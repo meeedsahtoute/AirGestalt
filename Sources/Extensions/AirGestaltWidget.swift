@@ -71,6 +71,8 @@ public struct ToggleNoiseModeIntent: AppIntent {
 
 @available(iOS 16.1, *)
 public struct AirGestaltWidget: Widget {
+    public init() {}
+
     public var body: some WidgetConfiguration {
         ActivityConfiguration(for: AirGestaltWidgetAttributes.self) { context in
             // Lock Screen Live Activity Banner
