@@ -461,3 +461,28 @@ extension CloneGATTClient: CBPeripheralDelegate {
         }
     }
 }
+
+// MARK: - Data Hex Extension Helper
+
+extension Data {
+    public init?(hexString: String) {
+        let clean = hexString.replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "0x", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard clean.count % 2 == 0 else { return nil }
+
+        var data = Data()
+        var index = clean.startIndex
+
+        while index < clean.endIndex {
+            let nextIndex = clean.index(index, offsetBy: 2)
+            let byteStr = clean[index..<nextIndex]
+            guard let byte = UInt8(byteStr, radix: 16) else { return nil }
+            data.append(byte)
+            index = nextIndex
+        }
+
+        self = data
+    }
+}
