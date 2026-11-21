@@ -4,6 +4,7 @@
 //
 //  Single Shared AVAudioEngine & Resilient Audio Session Coordinator.
 //  Protects against format and channel-count mismatches, handles route changes dynamically,
+//  integrates 10-band parametric EQ, zero-latency software transparency,
 //  and provides converter-backed safe buffer scheduling.
 //
 
@@ -16,13 +17,18 @@ public final class SharedAudioEngine: ObservableObject {
 
     public let engine = AVAudioEngine()
     public let playerNode = AVAudioPlayerNode()
+    public let eqNode = AVAudioUnitEQ(numberOfBands: 10)
+    public let transparencyMixer = AVAudioMixerNode()
     public let mainMixer: AVAudioMixerNode
 
     @Published public var isRunning: Bool = false
     @Published public var currentInputSampleRate: Double = 48000.0
     @Published public var preferredMicPort: String = "Built-In Microphone"
+    @Published public var activeOutputDeviceName: String = "Built-In Speaker"
     @Published public var isUsingEarbudMic: Bool = false
     @Published public var inputChannelCount: Int = 1
+    @Published public var isSoftwareTransparencyActive: Bool = false
+    @Published public var transparencyGain: Float = 1.0
 
     private var isTapInstalled: Bool = false
     private let engineQueue = DispatchQueue(label: "com.airgestalt.audioengine.queue", qos: .userInitiated)
@@ -31,16 +37,37 @@ public final class SharedAudioEngine: ObservableObject {
 
     private init() {
         self.mainMixer = engine.mainMixerNode
-        engine.attach(playerNode)
 
-        // Connect playerNode to mainMixer with canonical stereo format
-        if let format = SharedAudioEngine.canonicalFormat {
-            engine.connect(playerNode, to: mainMixer, format: format)
+        // Attach audio processing nodes to engine graph
+        engine.attach(playerNode)
+        engine.attach(eqNode)
+        engine.attach(transparencyMixer)
+
+        // Initialize transparency mixer to muted by default
+        transparencyMixer.outputVolume = 0.0
+
+        // Wire playback chain: playerNode -> eqNode -> mainMixer
+        wirePlaybackNodes()
+
+        // Wire transparency chain: transparencyMixer -> mainMixer
+        if let canonical = SharedAudioEngine.canonicalFormat {
+            engine.connect(transparencyMixer, to: mainMixer, format: canonical)
         } else {
-            engine.connect(playerNode, to: mainMixer, format: nil)
+            engine.connect(transparencyMixer, to: mainMixer, format: nil)
         }
 
         setupNotificationObservers()
+        updateActiveRoute()
+    }
+
+    private func wirePlaybackNodes() {
+        if let canonical = SharedAudioEngine.canonicalFormat {
+            engine.connect(playerNode, to: eqNode, format: canonical)
+            engine.connect(eqNode, to: mainMixer, format: canonical)
+        } else {
+            engine.connect(playerNode, to: eqNode, format: nil)
+            engine.connect(eqNode, to: mainMixer, format: nil)
+        }
     }
 
     // MARK: - Safe Audio Session Configuration
@@ -70,11 +97,21 @@ public final class SharedAudioEngine: ObservableObject {
         }
 
         try? session.setPreferredSampleRate(48000.0)
-        try? session.setPreferredIOBufferDuration(0.00533)
+        try? session.setPreferredIOBufferDuration(0.00533) // Ultra-low latency ~5.3ms
         try session.setActive(true, options: .notifyOthersOnDeactivation)
+
+        updateActiveRoute()
 
         DispatchQueue.main.async {
             self.currentInputSampleRate = session.sampleRate
+        }
+    }
+
+    public func updateActiveRoute() {
+        let session = AVAudioSession.sharedInstance()
+        let portName = session.currentRoute.outputs.first?.portName ?? "Built-In Speaker"
+        DispatchQueue.main.async {
+            self.activeOutputDeviceName = portName
         }
     }
 
@@ -85,7 +122,6 @@ public final class SharedAudioEngine: ObservableObject {
 
         try configureAudioSession(forceEarbudMic: isUsingEarbudMic)
 
-        // Ensure nodes are connected
         ensureNodesConnected()
 
         try engine.start()
@@ -113,9 +149,41 @@ public final class SharedAudioEngine: ObservableObject {
     private func ensureNodesConnected() {
         let targetFormat = playerNode.outputFormat(forBus: 0)
         if targetFormat.channelCount == 0 || targetFormat.sampleRate == 0 {
-            if let canonical = SharedAudioEngine.canonicalFormat {
-                engine.disconnectNodeOutput(playerNode)
-                engine.connect(playerNode, to: mainMixer, format: canonical)
+            wirePlaybackNodes()
+        }
+
+        // Check and safely wire inputNode to transparencyMixer
+        let inputNode = engine.inputNode
+        let inputFormat = inputNode.outputFormat(forBus: 0)
+        if inputFormat.sampleRate > 0 && inputFormat.channelCount > 0 {
+            engine.disconnectNodeOutput(inputNode)
+            engine.connect(inputNode, to: transparencyMixer, format: inputFormat)
+        }
+    }
+
+    // MARK: - Real Software Low-Latency Transparency
+
+    public func setTransparencyActive(_ active: Bool, gain: Float = 1.0) {
+        let safeGain = max(0.0, min(1.5, gain))
+        self.isSoftwareTransparencyActive = active
+        self.transparencyGain = safeGain
+
+        engineQueue.async { [weak self] in
+            guard let self = self else { return }
+
+            if active && !self.engine.isRunning {
+                do {
+                    try self.startEngine()
+                } catch {
+                    print("SharedAudioEngine: Failed to start for transparency: \(error)")
+                }
+            }
+
+            self.ensureNodesConnected()
+            self.transparencyMixer.outputVolume = active ? safeGain : 0.0
+
+            DispatchQueue.main.async {
+                self.isSoftwareTransparencyActive = active
             }
         }
     }
@@ -148,7 +216,7 @@ public final class SharedAudioEngine: ObservableObject {
                 return
             }
 
-            // 2. Hardware channel mismatch conversion (Mono to Stereo)
+            // 2. Hardware channel mismatch conversion (Mono to Stereo or Rate Conversion)
             if let converted = self.convertBuffer(buffer, to: outputFormat) {
                 self.playerNode.scheduleBuffer(converted, at: nil, options: [], completionHandler: nil)
                 if !self.playerNode.isPlaying { self.playerNode.play() }
@@ -237,6 +305,11 @@ public final class SharedAudioEngine: ObservableObject {
                let channel = buffer.floatChannelData?[0] {
                 AutoLatencyCalibrator.shared.appendMicrophoneSamples(channel, count: Int(buffer.frameLength))
             }
+
+            // Forward to ear tip fit test if active
+            if SpatialDSPEngine.shared.isRunningFitTest {
+                SpatialDSPEngine.shared.appendFitTestBuffer(buffer)
+            }
         }
 
         isTapInstalled = true
@@ -275,6 +348,7 @@ public final class SharedAudioEngine: ObservableObject {
             do {
                 try self.configureAudioSession(forceEarbudMic: self.isUsingEarbudMic)
                 if self.engine.isRunning {
+                    self.ensureNodesConnected()
                     self.installInputTapSafely()
                 }
             } catch {

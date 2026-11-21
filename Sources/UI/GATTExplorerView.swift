@@ -205,14 +205,26 @@ public struct GATTExplorerView: View {
                         }
                     }
 
-                    if let lastSent = gattClient.lastSentHex {
-                        HStack(spacing: 4) {
-                            Text("Last TX:")
-                                .font(.system(size: 10, weight: .semibold))
+                    VStack(alignment: .leading, spacing: 4) {
+                        if let lastSent = gattClient.lastSentHex {
+                            HStack(spacing: 4) {
+                                Text("Last TX:")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundColor(.secondary)
+                                Text(lastSent)
+                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                    .foregroundColor(.blue)
+                            }
+                        }
+
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(gattClient.isConnected ? Color.green : Color.orange)
+                                .frame(width: 6, height: 6)
+                            Text(gattClient.lastGATTStatus)
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
                                 .foregroundColor(.secondary)
-                            Text(lastSent)
-                                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                .foregroundColor(.blue)
+                                .lineLimit(1)
                         }
                     }
                 }

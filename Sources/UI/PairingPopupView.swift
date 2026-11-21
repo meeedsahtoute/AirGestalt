@@ -23,16 +23,16 @@ public struct PairingPopupView: View {
     private var frame: DeviceContinuityFrame {
         continuityDecoder.latestFrame ?? DeviceContinuityFrame(
             model: .airPodsPro2,
-            leftBattery: EarbudBatteryState(percentage: 80, isCharging: false),
-            rightBattery: EarbudBatteryState(percentage: 90, isCharging: false),
-            caseBattery: EarbudBatteryState(percentage: 100, isCharging: true),
-            leftInEar: true,
-            rightInEar: true,
-            primaryMicIsLeft: true,
-            lidOpenCount: 1,
-            rssi: -50,
-            smoothedRSSI: -50.0,
-            isNearProximity: true
+            leftBattery: EarbudBatteryState(percentage: nil, isCharging: false),
+            rightBattery: EarbudBatteryState(percentage: nil, isCharging: false),
+            caseBattery: EarbudBatteryState(percentage: nil, isCharging: false),
+            leftInEar: false,
+            rightInEar: false,
+            primaryMicIsLeft: false,
+            lidOpenCount: 0,
+            rssi: -100,
+            smoothedRSSI: -100.0,
+            isNearProximity: false
         )
     }
 
@@ -219,10 +219,14 @@ private struct BatteryRingItem: View {
                 Text("\(pct)%")
                     .font(.system(size: 13, weight: .bold, design: .rounded))
                     .foregroundColor(.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
             } else {
                 Text("—")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
             }
 
             Text(title)

@@ -5,7 +5,7 @@
 //  Dedicated Hardware Clone ANC Unlocker & BLE GATT Client.
 //  Connects to Airoha RACE, Nordic UART / Bluetrum, BES DataPath, and JieLi (JL),
 //  with 6-byte RACE framing, read-only diagnostic probing, interactive auto-detection,
-//  and a HARD safety lock.
+//  smart TV/clutter filtering, RSSI-descending sorting, and a HARD safety lock.
 //
 
 import Foundation
@@ -19,6 +19,13 @@ public struct DiscoveredCloneDevice: Identifiable, Equatable {
     public let rssi: Int
     public let advertisedServices: [String]
     public let probableVendor: ChipsetVendor?
+}
+
+public enum GATTConnectionState: String {
+    case disconnected = "Disconnected"
+    case connecting = "Connecting..."
+    case connected = "Connected ✓"
+    case failed = "Connection Failed"
 }
 
 public enum ChipsetSafetyError: LocalizedError {
@@ -44,13 +51,27 @@ public enum ChipsetSafetyError: LocalizedError {
 public final class CloneGATTClient: NSObject, ObservableObject {
     public static let shared = CloneGATTClient()
 
+    // MARK: - Clutter Keywords for TV & Appliance Filtering
+    public static let clutterKeywords = [
+        "tv", "samsung", "crystal", "lg", "bravia", "roku", "firetv",
+        "smart tv", "soundbar", "chromecast", "panasonic", "hisense",
+        "tcl", "vizio", "philips", "refrigerator", "microwave", "printer"
+    ]
+
     // MARK: - Published State
+    @Published public var connectionState: GATTConnectionState = .disconnected
     @Published public var isConnected: Bool = false
     @Published public var isConnecting: Bool = false
     @Published public var isProbing: Bool = false
     @Published public var isDetectingChipset: Bool = false
     @Published public var detectionStatusMessage: String = "Tap to Auto-Detect Chipset"
+    @Published public var lastGATTStatus: String = "Idle"
     @Published public var showDetectionSheet: Bool = false
+    @Published public var showAllDevices: Bool = UserDefaults.standard.bool(forKey: "com.airgestalt.showAllDevices") {
+        didSet {
+            UserDefaults.standard.set(showAllDevices, forKey: "com.airgestalt.showAllDevices")
+        }
+    }
     @Published public var discoveredCloneDevices: [DiscoveredCloneDevice] = []
 
     @Published public var connectedPeripheralName: String? = nil
@@ -75,7 +96,10 @@ public final class CloneGATTClient: NSObject, ObservableObject {
 
     public override init() {
         super.init()
-        self.centralManager = CBCentralManager(delegate: self, queue: DispatchQueue.main)
+        let options: [String: Any] = [
+            CBCentralManagerOptionShowPowerAlertKey: true
+        ]
+        self.centralManager = CBCentralManager(delegate: self, queue: DispatchQueue.main, options: options)
     }
 
     // MARK: - Connection Management
@@ -85,7 +109,10 @@ public final class CloneGATTClient: NSObject, ObservableObject {
         self.targetPeripheral = peripheral
         self.targetPeripheral?.delegate = self
         self.isConnecting = true
-        self.detectionStatusMessage = "Connecting to \(peripheral.name ?? "Earbud")..."
+        self.connectionState = .connecting
+        let name = peripheral.name ?? "Earbud"
+        self.detectionStatusMessage = "Connecting to \(name)..."
+        self.lastGATTStatus = "Connecting to \(name)..."
         centralManager.connect(peripheral, options: [CBConnectPeripheralOptionNotifyOnDisconnectionKey: true])
     }
 
@@ -96,10 +123,12 @@ public final class CloneGATTClient: NSObject, ObservableObject {
         isConnected = false
         isConnecting = false
         isProbing = false
+        connectionState = .disconnected
         targetPeripheral = nil
         activeWriteCharacteristic = nil
         activeNotifyCharacteristic = nil
         detectionStatusMessage = "Disconnected"
+        lastGATTStatus = "Disconnected"
     }
 
     // MARK: - Interactive Auto-Detect ANC Probing & Scanning
@@ -116,23 +145,27 @@ public final class CloneGATTClient: NSObject, ObservableObject {
 
         guard centralManager.state == .poweredOn else {
             detectionStatusMessage = "Bluetooth is currently unavailable."
+            lastGATTStatus = "Bluetooth unavailable."
             return
         }
 
         isDetectingChipset = true
         detectionStatusMessage = "Scanning BLE frequencies for clone earbuds..."
+        lastGATTStatus = "Scanning for clone peripherals..."
 
         // Scan for all peripherals
         centralManager.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
 
         scanTimeoutTimer?.invalidate()
-        scanTimeoutTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
+        scanTimeoutTimer = Timer.scheduledTimer(withTimeInterval: 6.0, repeats: false) { [weak self] _ in
             guard let self = self else { return }
             self.stopScan()
             if self.discoveredCloneDevices.isEmpty {
-                self.detectionStatusMessage = "No clone earbuds discovered. Ensure earbuds are taken out of the case."
+                self.detectionStatusMessage = "No clone earbuds discovered. Ensure earbuds are out of the case."
+                self.lastGATTStatus = "Scan completed: 0 devices found."
             } else {
                 self.detectionStatusMessage = "Discovered \(self.discoveredCloneDevices.count) device(s). Select one to connect."
+                self.lastGATTStatus = "Scan completed: \(self.discoveredCloneDevices.count) device(s) found."
             }
         }
     }
@@ -152,6 +185,7 @@ public final class CloneGATTClient: NSObject, ObservableObject {
 
         isProbing = true
         detectionStatusMessage = "Fingerprinting chipset GATT profiles..."
+        lastGATTStatus = "Probing chipset diagnostic opcodes..."
 
         // 1. Probe for Airoha RACE diagnostic opcode 0x1E08 (SDK / SoC query)
         do {
@@ -167,6 +201,7 @@ public final class CloneGATTClient: NSObject, ObservableObject {
             self.matchDiscoveredServicesWithProfile()
             self.isProbing = false
             self.detectionStatusMessage = "Identified: \(self.detectedChipsetName ?? "Standard Clone Profile")"
+            self.lastGATTStatus = "Profile active: \(self.detectedChipsetName ?? "Standard")"
         }
     }
 
@@ -227,7 +262,10 @@ public final class CloneGATTClient: NSObject, ObservableObject {
     // MARK: - ANC Command Dispatcher
 
     public func sendNoiseMode(_ mode: NoiseControlMode) {
-        guard let profile = activeProfile else { return }
+        guard let profile = activeProfile else {
+            self.lastGATTStatus = "No active chipset profile."
+            return
+        }
 
         let hexCommand: String
         switch mode {
@@ -242,6 +280,13 @@ public final class CloneGATTClient: NSObject, ObservableObject {
         }
 
         guard let data = Data(hexString: hexCommand) else {
+            self.lastGATTStatus = "Invalid hex command for profile: \(hexCommand)"
+            return
+        }
+
+        guard isConnected, activeWriteCharacteristic != nil else {
+            self.currentNoiseMode = mode
+            self.lastGATTStatus = "Hardware BLE Offline: Switched Software \(mode.title)"
             return
         }
 
@@ -249,6 +294,7 @@ public final class CloneGATTClient: NSObject, ObservableObject {
         DispatchQueue.main.async {
             self.currentNoiseMode = mode
             self.lastSentHex = hexCommand
+            self.lastGATTStatus = "TX Sent (\(mode.title)): \(hexCommand)"
         }
     }
 
@@ -269,6 +315,7 @@ public final class CloneGATTClient: NSObject, ObservableObject {
         sendRawBytes(data, direction: .tx)
         DispatchQueue.main.async {
             self.lastSentHex = targetHex
+            self.lastGATTStatus = "TX Sent (EQ): \(targetHex)"
         }
     }
 
@@ -277,6 +324,7 @@ public final class CloneGATTClient: NSObject, ObservableObject {
     public func sendRawBytes(_ data: Data, direction: PacketDirection = .tx) {
         guard let peripheral = targetPeripheral,
               let writeChar = activeWriteCharacteristic else {
+            self.lastGATTStatus = "TX Error: No writable characteristic connected."
             return
         }
 
@@ -310,7 +358,12 @@ public final class CloneGATTClient: NSObject, ObservableObject {
             }
         }
 
+        guard isConnected, activeWriteCharacteristic != nil else {
+            throw ChipsetSafetyError.notConnected
+        }
+
         sendRawBytes(data, direction: .tx)
+        self.lastGATTStatus = "Custom TX Sent: \(hexString)"
     }
 }
 
@@ -323,12 +376,25 @@ extension CloneGATTClient: CBCentralManagerDelegate {
         } else {
             isDetectingChipset = false
             isConnected = false
+            connectionState = .disconnected
         }
     }
 
     public func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String: Any], rssi RSSI: NSNumber) {
         let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String) ?? peripheral.name ?? "Bluetooth Audio Accessory"
         let serviceUUIDs = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID])?.map { $0.uuidString } ?? []
+
+        // Smart Clutter & TV Filtering
+        if !self.showAllDevices {
+            let lowerName = name.lowercased()
+            let isClutter = CloneGATTClient.clutterKeywords.contains(where: { lowerName.contains($0) })
+            if isClutter { return }
+
+            // Filter unnamed weak noise signals (< -85 dBm)
+            if (name == "Bluetooth Audio Accessory" || name.isEmpty) && RSSI.intValue < -85 && serviceUUIDs.isEmpty {
+                return
+            }
+        }
 
         var vendor: ChipsetVendor? = nil
         for s in serviceUUIDs {
@@ -347,18 +413,24 @@ extension CloneGATTClient: CBCentralManagerDelegate {
         )
 
         DispatchQueue.main.async {
-            if !self.discoveredCloneDevices.contains(where: { $0.id == device.id }) {
+            if let index = self.discoveredCloneDevices.firstIndex(where: { $0.id == device.id }) {
+                self.discoveredCloneDevices[index] = device
+            } else {
                 self.discoveredCloneDevices.append(device)
             }
+            // Sort dynamically by strongest signal (RSSI descending)
+            self.discoveredCloneDevices.sort { $0.rssi > $1.rssi }
         }
     }
 
     public func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         isConnected = true
         isConnecting = false
+        connectionState = .connected
         connectedPeripheralName = peripheral.name ?? "AirPods Pro (Clone)"
         let name = connectedPeripheralName ?? "Earbud"
         detectionStatusMessage = "Connected to \(name). Discovering services..."
+        lastGATTStatus = "Connected to \(name) ✓"
 
         // Discover all services
         peripheral.discoverServices(nil)
@@ -367,17 +439,21 @@ extension CloneGATTClient: CBCentralManagerDelegate {
     public func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         isConnected = false
         isConnecting = false
+        connectionState = .failed
         detectionStatusMessage = "Connection failed: \(error?.localizedDescription ?? "Unknown")"
+        lastGATTStatus = "Failed: \(error?.localizedDescription ?? "Unknown")"
     }
 
     public func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         isConnected = false
         isConnecting = false
+        connectionState = .disconnected
         connectedPeripheralName = nil
         targetPeripheral = nil
         activeWriteCharacteristic = nil
         activeNotifyCharacteristic = nil
         detectionStatusMessage = "Disconnected from earbud"
+        lastGATTStatus = "Disconnected"
     }
 }
 
@@ -428,6 +504,7 @@ extension CloneGATTClient: CBPeripheralDelegate {
         let hex = data.map { String(format: "%02X", $0) }.joined()
         DispatchQueue.main.async {
             self.lastReceivedHex = hex
+            self.lastGATTStatus = "RX ACK: \(hex)"
         }
 
         let record = GATTPacketRecord(

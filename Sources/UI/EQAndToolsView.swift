@@ -2,7 +2,7 @@
 //  EQAndToolsView.swift
 //  AirGestalt
 //
-//  10-Band Parametric EQ, Ear Tip Fit Test,
+//  10-Band Parametric EQ, Real Ear Tip Fit Acoustic Test,
 //  Stereo Find My Chirp, and Head-Tracked Spatial Audio Controls.
 //
 
@@ -10,6 +10,7 @@ import SwiftUI
 
 public struct EQAndToolsView: View {
     @ObservedObject var spatialDSP = SpatialDSPEngine.shared
+    @ObservedObject var gattClient = CloneGATTClient.shared
 
     public init() {}
 
@@ -51,6 +52,7 @@ public struct EQAndToolsView: View {
                                 Button(action: {
                                     HapticFeedbackManager.shared.selectionChanged()
                                     spatialDSP.applyPreset(preset)
+                                    gattClient.sendHardwareEQPreset(preset)
                                 }) {
                                     Label(preset.name, systemImage: preset.iconName)
                                 }
@@ -92,7 +94,7 @@ public struct EQAndToolsView: View {
                 )
                 .padding(.horizontal, 16)
 
-                // Ear Tip Fit Test Card
+                // Ear Tip Fit Test Card (Zero-Mock Acoustic Analysis)
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
                         Image(systemName: "ear.and.waveform")
@@ -102,7 +104,7 @@ public struct EQAndToolsView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Ear Tip Fit Acoustic Test")
                                 .font(.system(size: 14, weight: .bold))
-                            Text("Measures low-frequency acoustic seal response")
+                            Text("Real acoustic seal evaluation via 60Hz resonance")
                                 .font(.system(size: 11))
                                 .foregroundColor(.secondary)
                         }
@@ -146,7 +148,7 @@ public struct EQAndToolsView: View {
                     if let msg = spatialDSP.fitTestResultMessage {
                         Text(msg)
                             .font(.system(size: 12, weight: .semibold))
-                            .foregroundColor(spatialDSP.leftEarSealScore > 0.75 ? .green : .orange)
+                            .foregroundColor(spatialDSP.leftEarSealScore >= 0.75 ? .green : .orange)
                             .padding(.top, 2)
                     }
                 }
@@ -295,7 +297,6 @@ private struct CustomVerticalSlider: View {
         GeometryReader { geo in
             let height = geo.size.height
             let normalized = CGFloat((value - range.lowerBound) / (range.upperBound - range.lowerBound))
-            let thumbY = height * (1.0 - normalized)
 
             ZStack(alignment: .bottom) {
                 // Track
@@ -335,23 +336,33 @@ private struct EarSealIndicator: View {
     let title: String
     let score: Double
 
+    private var isTested: Bool {
+        score > 0.0
+    }
+
     private var isGood: Bool {
-        score > 0.75
+        score >= 0.75
     }
 
     var body: some View {
         HStack(spacing: 8) {
             Circle()
-                .fill(isGood ? Color.green : Color.orange)
+                .fill(!isTested ? Color.gray : (isGood ? Color.green : Color.orange))
                 .frame(width: 10, height: 10)
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
                     .font(.system(size: 12, weight: .bold))
 
-                Text(isGood ? "Good Seal (\(Int(score * 100))%)" : "Adjust Tip (\(Int(score * 100))%)")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
+                if isTested {
+                    Text(isGood ? "Good Seal (\(Int(score * 100))%)" : "Adjust Tip (\(Int(score * 100))%)")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                } else {
+                    Text("Not Tested")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
             }
             Spacer()
         }

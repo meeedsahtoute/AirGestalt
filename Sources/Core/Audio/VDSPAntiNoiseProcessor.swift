@@ -8,6 +8,7 @@
 //  2. Normalized Least Mean Squares (NLMS) Adaptive Filter with Phase Inversion
 //  3. Real-Time vDSP FFT Spectral Analysis & Psychoacoustic Noise Masking
 //  4. Conversation Awareness (Real-Time VAD) with Automatic 4-Second Silence Recovery
+//  5. Throttled ~15Hz MainActor Updates to eliminate UI stuttering.
 //
 
 import Foundation
@@ -21,7 +22,7 @@ public final class VDSPAntiNoiseProcessor: ObservableObject {
     // MARK: - Published Parameters
     @Published public var isEnabled: Bool = false
     @Published public var currentNoiseMode: NoiseControlMode = .off
-    @Published public var ambientSPLdB: Float = 42.0
+    @Published public var ambientSPLdB: Float = 0.0
     @Published public var isConversationActive: Bool = false
     @Published public var speechDuckingGain: Float = 1.0
     @Published public var frequencySpectrum: [Float] = Array(repeating: 0.0, count: 24)
@@ -37,7 +38,6 @@ public final class VDSPAntiNoiseProcessor: ObservableObject {
     private var delayBuffer: [Float]
 
     // Biquad IIR Filter Coefficients (35Hz - 550Hz Bandpass)
-    // Coeffs layout for vDSP_biquad: [b0, b1, b2, a1, a2] (with a0 normalized to 1)
     private var biquadSetup: vDSP_biquad_Setup?
     private var biquadDelays: [Float] = [Float](repeating: 0.0, count: 4)
 
@@ -57,6 +57,9 @@ public final class VDSPAntiNoiseProcessor: ObservableObject {
     private var lastSpeechDetectedTime: TimeInterval = 0
     private let silenceRecoveryTime: TimeInterval = 4.0 // 4 seconds
     private let speechEnergyThreshold: Float = 0.22
+
+    // Throttled UI Dispatch (~15Hz / ~66ms)
+    private var lastUiUpdateTime: TimeInterval = 0
 
     private init() {
         self.weights = [Float](repeating: 0.0, count: filterOrder)
@@ -113,13 +116,16 @@ public final class VDSPAntiNoiseProcessor: ObservableObject {
     // MARK: - Real-Time Audio Buffer Processing
 
     public func processInputBuffer(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
-        guard isEnabled, let channelData = buffer.floatChannelData else { return buffer }
+        guard let channelData = buffer.floatChannelData else { return buffer }
 
         let frameCount = Int(buffer.frameLength)
         let inputSamples = channelData[0]
 
-        // 1. Run FFT Analysis for Ambient SPL, Spectral Visualization, and VAD
+        // 1. Run Spectral Analysis & Ambient SPL (Always computes for live UI telemetry)
         analyzeSpectrumAndVAD(inputSamples: inputSamples, count: frameCount)
+
+        // If software anti-noise is not enabled, return raw buffer
+        guard isEnabled else { return buffer }
 
         // 2. Filter Low-Frequency Rumble through Biquad IIR
         var filteredRumble = [Float](repeating: 0.0, count: frameCount)
@@ -152,7 +158,6 @@ public final class VDSPAntiNoiseProcessor: ObservableObject {
         let activeGain = speechDuckingGain
         for i in 0..<frameCount {
             let combined = (phaseInverted[i] * 0.85 + maskingLayer[i] * 0.15) * activeGain
-            // Write into output buffer channel
             inputSamples[i] = combined
         }
 
@@ -188,7 +193,7 @@ public final class VDSPAntiNoiseProcessor: ObservableObject {
         }
     }
 
-    // MARK: - Spectral Analysis, Ambient dB, and Conversation VAD
+    // MARK: - Spectral Analysis, Ambient dB, and Conversation VAD (Throttled ~15Hz)
 
     private func analyzeSpectrumAndVAD(inputSamples: UnsafePointer<Float>, count: Int) {
         guard count >= fftSize else { return }
@@ -259,17 +264,20 @@ public final class VDSPAntiNoiseProcessor: ObservableObject {
             bands[b] = min(1.0, bandSum * 4.0)
         }
 
-        DispatchQueue.main.async {
-            self.ambientSPLdB = spl
-            self.isConversationActive = conversationDetected
-            self.frequencySpectrum = bands
+        // Throttle MainActor UI dispatches to ~15Hz (~66ms) to prevent UI thread starvation
+        if currentTime - lastUiUpdateTime >= 0.066 {
+            lastUiUpdateTime = currentTime
+            DispatchQueue.main.async {
+                self.ambientSPLdB = spl
+                self.isConversationActive = conversationDetected
+                self.frequencySpectrum = bands
+            }
         }
     }
 
     // MARK: - Psychoacoustic Masking (Brown / Pink Noise)
 
     private func generatePsychoacousticMasking(output: inout [Float], count: Int) {
-        // Base masking level scales with ambient room noise
         let baseLevel = max(0.005, min(0.12, (ambientSPLdB - 40.0) / 400.0))
 
         for i in 0..<count {

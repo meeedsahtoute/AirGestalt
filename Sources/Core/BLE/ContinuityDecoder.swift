@@ -310,7 +310,7 @@ extension ContinuityDecoder: CBPeripheralDelegate {
                     model: .airPodsPro2,
                     leftBattery: EarbudBatteryState(percentage: batteryLevel, isCharging: false),
                     rightBattery: EarbudBatteryState(percentage: batteryLevel, isCharging: false),
-                    caseBattery: EarbudBatteryState(percentage: 85, isCharging: false),
+                    caseBattery: EarbudBatteryState(percentage: nil, isCharging: false),
                     leftInEar: true,
                     rightInEar: true,
                     primaryMicIsLeft: true,

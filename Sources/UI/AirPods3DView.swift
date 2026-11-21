@@ -86,7 +86,23 @@ public struct AirPods3DView: UIViewRepresentable {
     }
 
     public func updateUIView(_ uiView: SCNView, context: Context) {
-        // Dynamic updates if needed
+        guard let scene = uiView.scene,
+              let root = scene.rootNode.childNode(withName: "rootModel", recursively: false) else { return }
+
+        let currentHasCase = root.childNode(withName: "caseNode", recursively: false) != nil
+        if currentHasCase != isCaseMode {
+            root.childNodes.forEach { $0.removeFromParentNode() }
+            if isCaseMode {
+                root.addChildNode(createProceduralCase(isCharging: isCharging))
+            } else {
+                let leftEarbud = createProceduralEarbud(isLeft: true)
+                leftEarbud.position = SCNVector3(-0.7, 0, 0)
+                let rightEarbud = createProceduralEarbud(isLeft: false)
+                rightEarbud.position = SCNVector3(0.7, 0, 0)
+                root.addChildNode(leftEarbud)
+                root.addChildNode(rightEarbud)
+            }
+        }
     }
 
     // MARK: - Procedural Earbud Geometry Construction
@@ -174,6 +190,7 @@ public struct AirPods3DView: UIViewRepresentable {
 
     private func createProceduralCase(isCharging: Bool) -> SCNNode {
         let caseRoot = SCNNode()
+        caseRoot.name = "caseNode"
 
         let whiteGlossy = SCNMaterial()
         whiteGlossy.lightingModel = .physicallyBased

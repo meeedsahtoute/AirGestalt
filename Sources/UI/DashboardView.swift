@@ -4,40 +4,47 @@
 //
 //  Main Apple Gestalt Control Center.
 //  Features a pinned status-safe blurred header, interactive Auto-Detect ANC scanner,
-//  segmented noise control pill, live vDSP FFT spectrum visualizer, and device spoofer.
+//  segmented noise control pill with real hardware GATT + software passthrough,
+//  live vDSP FFT spectrum visualizer, zero-mock battery indicators, and persistent spoofer.
 //
 
 import SwiftUI
+import AVFoundation
 
 public struct DashboardView: View {
     @ObservedObject var continuityDecoder = ContinuityDecoder.shared
     @ObservedObject var gattClient = CloneGATTClient.shared
     @ObservedObject var dspProcessor = VDSPAntiNoiseProcessor.shared
     @ObservedObject var calibrator = AutoLatencyCalibrator.shared
+    @ObservedObject var audioEngine = SharedAudioEngine.shared
 
-    // State for Custom Device Spoofer
+    // Persistent State for Custom Device Spoofer
+    @AppStorage("com.airgestalt.spoofedDeviceName") private var spoofedDeviceName: String = "AirPods Pro 2"
+    @AppStorage("com.airgestalt.spoofedSerialNumber") private var spoofedSerialNumber: String = "H7J2L90PQ4"
+    @AppStorage("com.airgestalt.spoofedModelCode") private var spoofedModelRaw: Int = Int(AirPodsModel.airPodsPro2.rawCode)
+
+    // State for Sheets & UI modes
     @State private var isShowingDeviceSpoofer: Bool = false
-    @State private var spoofedDeviceName: String = "AirPods Pro 2"
-    @State private var spoofedSerialNumber: String = "H7J2L90PQ4"
-    @State private var spoofedModel: AirPodsModel = .airPodsPro2
-
-    // State for Calibration Sheet
     @State private var isShowingCalibratorSheet: Bool = false
     @State private var isCase3DMode: Bool = false
+
+    private var spoofedModel: AirPodsModel {
+        AirPodsModel.from(rawModelCode: UInt16(spoofedModelRaw))
+    }
 
     private var currentFrame: DeviceContinuityFrame {
         continuityDecoder.latestFrame ?? DeviceContinuityFrame(
             model: spoofedModel,
-            leftBattery: EarbudBatteryState(percentage: 85, isCharging: false),
-            rightBattery: EarbudBatteryState(percentage: 90, isCharging: false),
-            caseBattery: EarbudBatteryState(percentage: 100, isCharging: false),
-            leftInEar: true,
-            rightInEar: true,
-            primaryMicIsLeft: true,
-            lidOpenCount: 1,
-            rssi: -58,
-            smoothedRSSI: -58.0,
-            isNearProximity: true
+            leftBattery: EarbudBatteryState(percentage: nil, isCharging: false),
+            rightBattery: EarbudBatteryState(percentage: nil, isCharging: false),
+            caseBattery: EarbudBatteryState(percentage: nil, isCharging: false),
+            leftInEar: false,
+            rightInEar: false,
+            primaryMicIsLeft: false,
+            lidOpenCount: 0,
+            rssi: -100,
+            smoothedRSSI: -100.0,
+            isNearProximity: false
         )
     }
 
@@ -66,7 +73,7 @@ public struct DashboardView: View {
                         .padding(12)
                     }
 
-                    // Battery Horizontal Pill Cards
+                    // Battery Horizontal Pill Cards (Zero-Mock: Shows "—" when disconnected)
                     HStack(spacing: 12) {
                         BatteryStatusCard(
                             title: "Left",
@@ -95,7 +102,7 @@ public struct DashboardView: View {
                 .padding(.top, 8)
 
                 // Native iOS Noise Control Segmented Pill
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 10) {
                     HStack {
                         Text("NOISE CONTROL")
                             .font(.system(size: 11, weight: .semibold))
@@ -131,6 +138,27 @@ public struct DashboardView: View {
                     .padding(5)
                     .background(Color(uiColor: .tertiarySystemBackground))
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+                    // Real-Time Hardware GATT / Passthrough Status Line
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(gattClient.isConnected ? Color.green : Color.blue)
+                            .frame(width: 6, height: 6)
+
+                        Text(gattClient.lastGATTStatus)
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+
+                        Spacer()
+
+                        if audioEngine.isSoftwareTransparencyActive {
+                            Text("Software Passthrough ON")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(.blue)
+                        }
+                    }
+                    .padding(.horizontal, 4)
                 }
                 .padding(.horizontal, 16)
 
@@ -142,9 +170,15 @@ public struct DashboardView: View {
                                 .font(.system(size: 11, weight: .semibold))
                                 .foregroundColor(.secondary)
 
-                            Text(String(format: "Ambient Sound Level: %.1f dB SPL", dspProcessor.ambientSPLdB))
-                                .font(.system(size: 14, weight: .bold, design: .rounded))
-                                .foregroundColor(.primary)
+                            if dspProcessor.ambientSPLdB > 10.0 {
+                                Text(String(format: "Ambient Sound Level: %.1f dB SPL", dspProcessor.ambientSPLdB))
+                                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                                    .foregroundColor(.primary)
+                            } else {
+                                Text("Ambient Sound Level: — dB SPL (Idle)")
+                                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                                    .foregroundColor(.secondary)
+                            }
                         }
 
                         Spacer()
@@ -269,14 +303,14 @@ public struct DashboardView: View {
             DeviceSpooferSheet(
                 deviceName: $spoofedDeviceName,
                 serialNumber: $spoofedSerialNumber,
-                selectedModel: $spoofedModel
+                selectedModelRaw: $spoofedModelRaw
             )
         }
         .sheet(isPresented: $isShowingCalibratorSheet) {
             AcousticCalibratorSheet(calibrator: calibrator)
         }
         .sheet(isPresented: $gattClient.showDetectionSheet) {
-            ChipsetDetectionSheet(gattClient: gattClient)
+            ChipsetDetectionSheet(gattClient: gattClient, audioEngine: audioEngine)
         }
     }
 
@@ -286,9 +320,10 @@ public struct DashboardView: View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(spoofedDeviceName)
+                    Text(audioEngine.activeOutputDeviceName)
                         .font(.system(size: 20, weight: .bold, design: .rounded))
                         .foregroundColor(.primary)
+                        .lineLimit(1)
 
                     Button(action: {
                         isShowingDeviceSpoofer = true
@@ -309,10 +344,10 @@ public struct DashboardView: View {
             // Connection Indicator Badge
             HStack(spacing: 6) {
                 Circle()
-                    .fill(gattClient.isConnected ? Color.green : Color.orange)
+                    .fill(gattClient.isConnected ? Color.green : (continuityDecoder.latestFrame != nil ? Color.blue : Color.orange))
                     .frame(width: 8, height: 8)
 
-                Text(gattClient.isConnected ? "GATT Active" : "Continuity")
+                Text(gattClient.isConnected ? "GATT Active" : (continuityDecoder.latestFrame != nil ? "Continuity" : "Ready"))
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(.secondary)
             }
@@ -336,6 +371,7 @@ public struct DashboardView: View {
         AudioChimeSynthesizer.shared.playModeSwitchChime(for: mode)
         dspProcessor.setNoiseMode(mode)
         gattClient.sendNoiseMode(mode)
+        audioEngine.setTransparencyActive(mode == .transparency)
     }
 }
 
@@ -389,10 +425,14 @@ private struct BatteryStatusCard: View {
                     if let pct = battery.percentage {
                         Text("\(pct)%")
                             .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
                     } else {
                         Text("—")
                             .font(.system(size: 12, weight: .bold))
                             .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
                     }
 
                     if battery.isCharging {
@@ -416,30 +456,31 @@ private struct BatteryStatusCard: View {
 
 private struct ChipsetDetectionSheet: View {
     @ObservedObject var gattClient: CloneGATTClient
+    @ObservedObject var audioEngine: SharedAudioEngine
     @Environment(\.dismiss) var dismiss
 
     var body: some View {
         NavigationView {
-            VStack(spacing: 20) {
+            VStack(spacing: 16) {
                 // Header Banner
                 VStack(spacing: 8) {
                     ZStack {
                         Circle()
                             .fill(Color.blue.opacity(0.12))
-                            .frame(width: 64, height: 64)
+                            .frame(width: 58, height: 58)
 
                         if gattClient.isDetectingChipset || gattClient.isProbing {
                             ProgressView()
                                 .progressViewStyle(CircularProgressViewStyle(tint: .blue))
                         } else {
                             Image(systemName: "cpu")
-                                .font(.system(size: 28))
+                                .font(.system(size: 26))
                                 .foregroundColor(.blue)
                         }
                     }
 
                     Text("Auto-Detect Hardware ANC")
-                        .font(.system(size: 20, weight: .bold, design: .rounded))
+                        .font(.system(size: 19, weight: .bold, design: .rounded))
 
                     Text(gattClient.detectionStatusMessage)
                         .font(.system(size: 12))
@@ -449,12 +490,39 @@ private struct ChipsetDetectionSheet: View {
                 }
                 .padding(.top, 12)
 
+                // Active iOS Audio Route Indicator Card
+                HStack(spacing: 10) {
+                    Image(systemName: "headphones")
+                        .font(.system(size: 16))
+                        .foregroundColor(.blue)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("ACTIVE AUDIO ROUTE")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(.secondary)
+
+                        Text(audioEngine.activeOutputDeviceName)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.primary)
+                    }
+
+                    Spacer()
+
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .font(.system(size: 15))
+                }
+                .padding(12)
+                .background(Color(uiColor: .secondarySystemBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .padding(.horizontal, 16)
+
                 // Currently Active / Identified Profile Card
                 if let profile = gattClient.activeProfile {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            Text("ACTIVE PROFILE")
-                                .font(.system(size: 11, weight: .bold))
+                            Text("ACTIVE CHIPSET PROFILE")
+                                .font(.system(size: 10, weight: .bold))
                                 .foregroundColor(.secondary)
                             Spacer()
                             Text(profile.vendor.rawValue)
@@ -463,7 +531,7 @@ private struct ChipsetDetectionSheet: View {
                         }
 
                         Text(profile.name)
-                            .font(.system(size: 15, weight: .bold))
+                            .font(.system(size: 14, weight: .bold))
 
                         HStack(spacing: 8) {
                             CapabilityPill(title: "Hardware ANC", isSupported: !profile.ancOnHex.isEmpty)
@@ -471,34 +539,37 @@ private struct ChipsetDetectionSheet: View {
                             CapabilityPill(title: "Hardware EQ", isSupported: profile.eqBassBoostHex != nil)
                         }
                     }
-                    .padding(14)
+                    .padding(12)
                     .background(Color(uiColor: .secondarySystemBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     .padding(.horizontal, 16)
                 }
 
-                // Discovered Clone Devices List
+                // Discovered Clone Devices List & Filter Control
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text("NEARBY ACCESSORIES")
+                        Text("NEARBY BLE ACCESSORIES")
                             .font(.system(size: 11, weight: .bold))
                             .foregroundColor(.secondary)
                         Spacer()
-                        if gattClient.isDetectingChipset {
-                            Text("Scanning...")
-                                .font(.system(size: 11))
-                                .foregroundColor(.blue)
-                        }
+
+                        Toggle("Show TVs & Clutter", isOn: $gattClient.showAllDevices)
+                            .font(.system(size: 11))
+                            .labelsHidden()
+
+                        Text(gattClient.showAllDevices ? "All Devices" : "Filtered")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(gattClient.showAllDevices ? .orange : .secondary)
                     }
                     .padding(.horizontal, 18)
 
                     if gattClient.discoveredCloneDevices.isEmpty {
                         VStack(spacing: 8) {
-                            Text("No accessory discovered yet.")
+                            Text(gattClient.isDetectingChipset ? "Searching for clone earbuds..." : "No earbud discovered.")
                                 .font(.system(size: 13))
                                 .foregroundColor(.secondary)
 
-                            Button("Rescan Frequencies") {
+                            Button("Scan Nearby Devices") {
                                 HapticFeedbackManager.shared.buttonTap()
                                 gattClient.startAutoDetectANCScan()
                             }
@@ -506,7 +577,7 @@ private struct ChipsetDetectionSheet: View {
                             .foregroundColor(.blue)
                         }
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 24)
+                        .padding(.vertical, 20)
                     } else {
                         List(gattClient.discoveredCloneDevices) { device in
                             Button(action: {
@@ -523,26 +594,36 @@ private struct ChipsetDetectionSheet: View {
                                             .font(.system(size: 14, weight: .bold))
                                             .foregroundColor(.primary)
 
-                                        if let vendor = device.probableVendor {
-                                            Text(vendor.rawValue)
-                                                .font(.system(size: 11))
-                                                .foregroundColor(.blue)
-                                        } else {
-                                            Text("Signal: \(device.rssi) dBm")
-                                                .font(.system(size: 11))
+                                        HStack(spacing: 6) {
+                                            if let vendor = device.probableVendor {
+                                                Text(vendor.rawValue)
+                                                    .font(.system(size: 11, weight: .medium))
+                                                    .foregroundColor(.blue)
+                                            }
+                                            Text("\(device.rssi) dBm")
+                                                .font(.system(size: 10, design: .monospaced))
                                                 .foregroundColor(.secondary)
                                         }
                                     }
 
                                     Spacer()
 
-                                    Text("Connect")
-                                        .font(.system(size: 12, weight: .semibold))
-                                        .foregroundColor(.white)
-                                        .padding(.horizontal, 12)
-                                        .padding(.vertical, 6)
-                                        .background(Color.blue)
-                                        .clipShape(Capsule())
+                                    if gattClient.isConnecting && gattClient.connectedPeripheralName == device.name {
+                                        ProgressView()
+                                            .frame(width: 24, height: 24)
+                                    } else if gattClient.isConnected && gattClient.connectedPeripheralName == device.name {
+                                        Text("Connected")
+                                            .font(.system(size: 11, weight: .bold))
+                                            .foregroundColor(.green)
+                                    } else {
+                                        Text("Connect")
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundColor(.white)
+                                            .padding(.horizontal, 12)
+                                            .padding(.vertical, 6)
+                                            .background(Color.blue)
+                                            .clipShape(Capsule())
+                                    }
                                 }
                             }
                         }
@@ -582,8 +663,15 @@ private struct CapabilityPill: View {
 private struct DeviceSpooferSheet: View {
     @Binding var deviceName: String
     @Binding var serialNumber: String
-    @Binding var selectedModel: AirPodsModel
+    @Binding var selectedModelRaw: Int
     @Environment(\.dismiss) var dismiss
+
+    private var selectedModelBinding: Binding<AirPodsModel> {
+        Binding(
+            get: { AirPodsModel.from(rawModelCode: UInt16(selectedModelRaw)) },
+            set: { selectedModelRaw = Int($0.rawCode) }
+        )
+    }
 
     var body: some View {
         NavigationView {
@@ -594,7 +682,7 @@ private struct DeviceSpooferSheet: View {
                 }
 
                 Section(header: Text("Spoofed Hardware Model")) {
-                    Picker("Model Badge", selection: $selectedModel) {
+                    Picker("Model Badge", selection: selectedModelBinding) {
                         ForEach(AirPodsModel.allCases) { model in
                             Text(model.displayName).tag(model)
                         }
@@ -670,7 +758,7 @@ private struct AcousticCalibratorSheet: View {
                 .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                 .padding(.horizontal, 24)
 
-                // Manual Fine-Tune Slider (0ms to 250ms)
+                // Manual Fine-Tune Slider (-40ms to +40ms)
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text("Manual Phase Offset:")

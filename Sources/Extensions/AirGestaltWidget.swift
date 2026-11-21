@@ -23,10 +23,10 @@ public struct AirGestaltWidgetAttributes: ActivityAttributes {
         public var isCharging: Bool
 
         public init(
-            leftBattery: Int = 85,
-            rightBattery: Int = 90,
-            caseBattery: Int = 100,
-            noiseMode: String = "ANC",
+            leftBattery: Int = 0,
+            rightBattery: Int = 0,
+            caseBattery: Int = 0,
+            noiseMode: String = "Off",
             isCharging: Bool = false
         ) {
             self.leftBattery = leftBattery

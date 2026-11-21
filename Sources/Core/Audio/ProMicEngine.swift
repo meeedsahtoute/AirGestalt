@@ -51,6 +51,9 @@ public final class ProMicEngine: NSObject, ObservableObject, AVAudioPlayerDelega
     private let gateAttack: Float = 0.08
     private let gateRelease: Float = 0.02
 
+    // Throttled UI State Dispatch (~15Hz)
+    private var lastVuUpdateTime: TimeInterval = 0
+
     // Audio Recorder & Comparison Player
     private var audioRecorder: AVAudioRecorder?
     private var audioPlayer: AVAudioPlayer?
@@ -185,9 +188,13 @@ public final class ProMicEngine: NSObject, ObservableObject, AVAudioPlayerDelega
             vDSP_vsmul(samples, 1, &linearGain, samples, 1, vDSP_Length(frameCount))
         }
 
-        DispatchQueue.main.async {
-            self.vuMeterLevel = normalizedVU
-            self.peakLevelDb = db
+        let now = Date().timeIntervalSince1970
+        if now - lastVuUpdateTime >= 0.066 {
+            lastVuUpdateTime = now
+            DispatchQueue.main.async {
+                self.vuMeterLevel = normalizedVU
+                self.peakLevelDb = db
+            }
         }
     }
 
