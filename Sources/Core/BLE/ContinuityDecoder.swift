@@ -44,10 +44,20 @@ public final class ContinuityDecoder: NSObject, ObservableObject {
 
     public override init() {
         super.init()
-        let options: [String: Any] = [
-            CBCentralManagerOptionRestoreIdentifierKey: ContinuityDecoder.restoreIdentifier,
+        var options: [String: Any] = [
             CBCentralManagerOptionShowPowerAlertKey: true
         ]
+
+        // LiveContainer compatibility check:
+        // Only pass CBCentralManagerOptionRestoreIdentifierKey if the runtime host bundle's
+        // Info.plist explicitly specifies "bluetooth-central" in UIBackgroundModes.
+        // Under LiveContainer, guest binaries share the host Info.plist which omits this,
+        // and attempting state restoration would throw an NSInternalInconsistencyException.
+        if let backgroundModes = Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") as? [String],
+           backgroundModes.contains("bluetooth-central") {
+            options[CBCentralManagerOptionRestoreIdentifierKey] = ContinuityDecoder.restoreIdentifier
+        }
+
         self.centralManager = CBCentralManager(delegate: self, queue: DispatchQueue.main, options: options)
     }
 
