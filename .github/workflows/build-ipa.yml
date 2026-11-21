@@ -8,22 +8,31 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build LiveContainer & SideStore IPAs
-    runs-on: macos-14
-    permissions:
-      contents: write
+    runs-on: macos-latest
 
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4
 
       - name: Select Xcode Version
-        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+        run: |
+          if [ -d "/Applications/Xcode_16.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.app
+          elif [ -d "/Applications/Xcode_15.4.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_15.4.app
+          elif [ -d "/Applications/Xcode.app" ]; then
+            sudo xcode-select -s /Applications/Xcode.app
+          fi
+          xcodebuild -version
 
       - name: Install XcodeGen
-        run: brew install xcodegen
+        run: which xcodegen || brew install xcodegen
 
       - name: Generate Xcode Project
         run: xcodegen generate
@@ -38,7 +47,8 @@ jobs:
             -derivedDataPath derived_data_core \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            AD_HOC_CODE_SIGNING_ALLOWED=YES
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGN_IDENTITY=""
 
       - name: Build AirGestaltFull (SideStore / AltStore with Dynamic Island)
         run: |
@@ -50,12 +60,18 @@ jobs:
             -derivedDataPath derived_data_full \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            AD_HOC_CODE_SIGNING_ALLOWED=YES
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGN_IDENTITY=""
 
       - name: Package AirGestalt-LiveContainer.ipa
         run: |
           mkdir -p build_output/core/Payload
-          cp -R derived_data_core/Build/Products/Release-iphoneos/AirGestalt.app build_output/core/Payload/
+          APP_PATH=$(find derived_data_core -name "AirGestalt.app" -type d | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "Error: AirGestalt.app not found!"
+            exit 1
+          fi
+          cp -R "$APP_PATH" build_output/core/Payload/
           cd build_output/core
           zip -r ../../AirGestalt-LiveContainer.ipa Payload
           cd ../..
@@ -63,7 +79,12 @@ jobs:
       - name: Package AirGestalt-SideStore.ipa
         run: |
           mkdir -p build_output/full/Payload
-          cp -R derived_data_full/Build/Products/Release-iphoneos/"AirGestalt Pro.app" build_output/full/Payload/
+          FULL_APP_PATH=$(find derived_data_full -name "AirGestalt Pro.app" -type d | head -n 1)
+          if [ -z "$FULL_APP_PATH" ]; then
+            echo "Error: AirGestalt Pro.app not found!"
+            exit 1
+          fi
+          cp -R "$FULL_APP_PATH" build_output/full/Payload/
           cd build_output/full
           zip -r ../../AirGestalt-SideStore.ipa Payload
           cd ../..
@@ -80,8 +101,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name == 'main' && 'latest' || github.ref_name }}
-          name: AirGestalt Release (${{ github.ref_name }})
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v1.0.0' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'AirGestalt v1.0.0' }}
           body: |
             ## AirGestalt Dual-Target Release
             

@@ -12,6 +12,9 @@ settings:
     ENABLE_BITCODE: NO
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
     TARGETED_DEVICE_FAMILY: "1"
+    CODE_SIGNING_ALLOWED: NO
+    CODE_SIGNING_REQUIRED: NO
+    AD_HOC_CODE_SIGNING_ALLOWED: YES
 
 targets:
   AirGestaltCore:
@@ -24,6 +27,7 @@ targets:
       - Sources/Core
       - Sources/Profiles
       - Sources/UI
+      - Config/Assets.xcassets
     info:
       path: Config/Info-Core.plist
     settings:
@@ -60,6 +64,7 @@ targets:
       - Sources/Core
       - Sources/Profiles
       - Sources/UI
+      - Config/Assets.xcassets
     dependencies:
       - target: AirGestaltWidget
     info:
