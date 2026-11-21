@@ -135,14 +135,15 @@ public final class SpatialDSPEngine: ObservableObject {
             sweep[i] = Float((tone60 + tone3k) * min(1.0, t * 4.0))
         }
 
-        let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
-        guard let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(totalSamples)) else { return }
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2),
+              let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(totalSamples)) else { return }
         pcm.frameLength = AVAudioFrameCount(totalSamples)
-        if let ptr = pcm.floatChannelData?[0] {
-            memcpy(ptr, sweep, totalSamples * MemoryLayout<Float>.size)
+        if let left = pcm.floatChannelData?[0], let right = pcm.floatChannelData?[1] {
+            memcpy(left, sweep, totalSamples * MemoryLayout<Float>.size)
+            memcpy(right, sweep, totalSamples * MemoryLayout<Float>.size)
         }
 
-        SharedAudioEngine.shared.playerNode.scheduleBuffer(pcm, at: nil, options: [], completionHandler: nil)
+        SharedAudioEngine.shared.scheduleBufferSafely(pcm)
     }
 
     // MARK: - Stereo Find My Chirp (2kHz - 4kHz High-Pitched Pulsed Beacon)
@@ -182,8 +183,8 @@ public final class SpatialDSPEngine: ObservableObject {
             samples[i] = Float(sin(phase) * envelope * 0.85)
         }
 
-        let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2)!
-        guard let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(totalSamples)) else { return }
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2),
+              let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(totalSamples)) else { return }
         pcm.frameLength = AVAudioFrameCount(totalSamples)
 
         if let left = pcm.floatChannelData?[0], let right = pcm.floatChannelData?[1] {
@@ -196,7 +197,7 @@ public final class SpatialDSPEngine: ObservableObject {
             }
         }
 
-        SharedAudioEngine.shared.playerNode.scheduleBuffer(pcm, at: nil, options: [], completionHandler: nil)
+        SharedAudioEngine.shared.scheduleBufferSafely(pcm)
     }
 
     // MARK: - CoreMotion Head Tracking & 3D Spatial Audio

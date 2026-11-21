@@ -38,6 +38,11 @@ public struct ChipsetDatabase {
         public static let qualcommService = CBUUID(string: "0000FE2C-0000-1000-8000-00805F9B34FB")
         public static let qualcommWriteChar = CBUUID(string: "0000FE2D-0000-1000-8000-00805F9B34FB")
         public static let qualcommNotifyChar = CBUUID(string: "0000FE2E-0000-1000-8000-00805F9B34FB")
+
+        // JieLi / Jerry (JL) AC697N / JL7003 / AC8973
+        public static let jlService = CBUUID(string: "0000AE00-0000-1000-8000-00805F9B34FB")
+        public static let jlWriteChar = CBUUID(string: "0000AE01-0000-1000-8000-00805F9B34FB")
+        public static let jlNotifyChar = CBUUID(string: "0000AE02-0000-1000-8000-00805F9B34FB")
     }
 
     // MARK: - Airoha RACE Protocol Constants
@@ -174,6 +179,24 @@ public struct ChipsetDatabase {
             eqBassBoostHex: "00030501",
             eqTrebleBoostHex: "00030502",
             eqFlatHex: "00030500"
+        ),
+
+        // 7. JieLi / Jerry (JL7003 / AC8973)
+        ChipsetProfile(
+            name: "JieLi / Jerry (JL7003 / AC8973)",
+            vendor: .jl,
+            chipset: "JL7003/AC8973",
+            serviceUUID: KnownUUIDs.jlService.uuidString,
+            writeCharUUID: KnownUUIDs.jlWriteChar.uuidString,
+            notifyCharUUID: KnownUUIDs.jlNotifyChar.uuidString,
+            ancOnHex: "FA5503010100",
+            transparencyHex: "FA5503010200",
+            adaptiveHex: "FA5503010300",
+            ancOffHex: "FA5503010000",
+            batteryQueryHex: "FA55020100",
+            eqBassBoostHex: "FA5503040100",
+            eqTrebleBoostHex: "FA5503040200",
+            eqFlatHex: "FA5503040000"
         )
     ]
 

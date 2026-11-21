@@ -113,15 +113,16 @@ public final class AutoLatencyCalibrator: ObservableObject {
     }
 
     private func playChirpAudio() {
-        let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
-        guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(referenceChirp.count)) else { return }
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2),
+              let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(referenceChirp.count)) else { return }
 
         pcmBuffer.frameLength = AVAudioFrameCount(referenceChirp.count)
-        if let channel = pcmBuffer.floatChannelData?[0] {
-            memcpy(channel, referenceChirp, referenceChirp.count * MemoryLayout<Float>.size)
+        if let left = pcmBuffer.floatChannelData?[0], let right = pcmBuffer.floatChannelData?[1] {
+            memcpy(left, referenceChirp, referenceChirp.count * MemoryLayout<Float>.size)
+            memcpy(right, referenceChirp, referenceChirp.count * MemoryLayout<Float>.size)
         }
 
-        SharedAudioEngine.shared.playerNode.scheduleBuffer(pcmBuffer, at: nil, options: [], completionHandler: nil)
+        SharedAudioEngine.shared.scheduleBufferSafely(pcmBuffer)
     }
 
     // Capture incoming microphone samples during calibration

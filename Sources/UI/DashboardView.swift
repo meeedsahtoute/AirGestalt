@@ -3,8 +3,8 @@
 //  AirGestalt
 //
 //  Main Apple Gestalt Control Center.
-//  Includes Noise Control segmented pill, live vDSP FFT spectrum visualizer,
-//  Device Spoofer sheet, acoustic calibration launcher, and 3D earbud inspection.
+//  Features a pinned status-safe blurred header, interactive Auto-Detect ANC scanner,
+//  segmented noise control pill, live vDSP FFT spectrum visualizer, and device spoofer.
 //
 
 import SwiftUI
@@ -44,48 +44,6 @@ public struct DashboardView: View {
     public var body: some View {
         ScrollView(showsIndicators: false) {
             VStack(spacing: 20) {
-                // Top Header: Device Name & Spoofer Button
-                HStack(alignment: .center) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 6) {
-                            Text(spoofedDeviceName)
-                                .font(.system(size: 24, weight: .bold, design: .rounded))
-                                .foregroundColor(.primary)
-
-                            Button(action: {
-                                isShowingDeviceSpoofer = true
-                            }) {
-                                Image(systemName: "pencil.circle.fill")
-                                    .font(.system(size: 16))
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-
-                        Text("Serial: \(spoofedSerialNumber) • \(currentFrame.model.badgeName)")
-                            .font(.system(size: 12, weight: .medium, design: .monospaced))
-                            .foregroundColor(.secondary)
-                    }
-
-                    Spacer()
-
-                    // Connection Indicator Badge
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(gattClient.isConnected ? Color.green : Color.orange)
-                            .frame(width: 8, height: 8)
-
-                        Text(gattClient.isConnected ? "GATT Active" : "Continuity")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(.secondary)
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(Color.secondary.opacity(0.12))
-                    .clipShape(Capsule())
-                }
-                .padding(.horizontal, 18)
-                .padding(.top, 10)
-
                 // 3D Procedural Earbud Model Card
                 VStack(spacing: 10) {
                     ZStack(alignment: .topTrailing) {
@@ -134,12 +92,13 @@ public struct DashboardView: View {
                         .fill(Color(uiColor: .secondarySystemBackground))
                 )
                 .padding(.horizontal, 16)
+                .padding(.top, 8)
 
                 // Native iOS Noise Control Segmented Pill
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
                         Text("NOISE CONTROL")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(.system(size: 11, weight: .semibold))
                             .foregroundColor(.secondary)
 
                         Spacer()
@@ -236,22 +195,35 @@ public struct DashboardView: View {
                 // Quick Clone Hardware Actions
                 VStack(spacing: 12) {
                     HStack(spacing: 12) {
-                        // Auto-Detect Hardware ANC Probe
+                        // Interactive Auto-Detect Hardware ANC Probe Button
                         Button(action: {
                             HapticFeedbackManager.shared.buttonTap()
-                            gattClient.autoDetectHardwareANC()
+                            gattClient.startAutoDetectANCScan()
                         }) {
-                            HStack {
-                                Image(systemName: "cpu")
-                                    .font(.system(size: 16))
+                            HStack(spacing: 10) {
+                                if gattClient.isDetectingChipset || gattClient.isProbing {
+                                    ProgressView()
+                                        .progressViewStyle(CircularProgressViewStyle(tint: .blue))
+                                        .frame(width: 22, height: 22)
+                                } else {
+                                    Image(systemName: "cpu")
+                                        .font(.system(size: 18))
+                                        .foregroundColor(.blue)
+                                }
+
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("Auto-Detect ANC")
                                         .font(.system(size: 13, weight: .bold))
-                                    Text(gattClient.isProbing ? "Probing GATT..." : (gattClient.detectedChipsetName ?? "Tap to Identify"))
+
+                                    Text(gattClient.isDetectingChipset ? "Scanning BLE..." : (gattClient.detectedChipsetName ?? "Tap to Identify"))
                                         .font(.system(size: 10))
                                         .foregroundColor(.secondary)
+                                        .lineLimit(1)
                                 }
                                 Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(.secondary)
                             }
                             .foregroundColor(.primary)
                             .padding(12)
@@ -289,6 +261,10 @@ public struct DashboardView: View {
                 .padding(.bottom, 24)
             }
         }
+        // Pin Header to Top Safe Area to prevent scroll collision in LiveContainer
+        .safeAreaInset(edge: .top) {
+            pinnedHeaderView
+        }
         .sheet(isPresented: $isShowingDeviceSpoofer) {
             DeviceSpooferSheet(
                 deviceName: $spoofedDeviceName,
@@ -299,6 +275,60 @@ public struct DashboardView: View {
         .sheet(isPresented: $isShowingCalibratorSheet) {
             AcousticCalibratorSheet(calibrator: calibrator)
         }
+        .sheet(isPresented: $gattClient.showDetectionSheet) {
+            ChipsetDetectionSheet(gattClient: gattClient)
+        }
+    }
+
+    // MARK: - Pinned Safe-Area Header View
+
+    private var pinnedHeaderView: some View {
+        HStack(alignment: .center) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(spoofedDeviceName)
+                        .font(.system(size: 20, weight: .bold, design: .rounded))
+                        .foregroundColor(.primary)
+
+                    Button(action: {
+                        isShowingDeviceSpoofer = true
+                    }) {
+                        Image(systemName: "pencil.circle.fill")
+                            .font(.system(size: 15))
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                Text("Serial: \(spoofedSerialNumber) • \(currentFrame.model.badgeName)")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            // Connection Indicator Badge
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(gattClient.isConnected ? Color.green : Color.orange)
+                    .frame(width: 8, height: 8)
+
+                Text(gattClient.isConnected ? "GATT Active" : "Continuity")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.secondary.opacity(0.12))
+            .clipShape(Capsule())
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
+        .background(
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .ignoresSafeArea(edges: .top)
+                .overlay(Divider().opacity(0.25), alignment: .bottom)
+        )
     }
 
     private func selectNoiseMode(_ mode: NoiseControlMode) {
@@ -379,6 +409,171 @@ private struct BatteryStatusCard: View {
         .frame(maxWidth: .infinity)
         .background(Color(uiColor: .tertiarySystemBackground))
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+}
+
+// MARK: - Interactive Chipset Detection Sheet
+
+private struct ChipsetDetectionSheet: View {
+    @ObservedObject var gattClient: CloneGATTClient
+    @Environment(\.dismiss) var dismiss
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 20) {
+                // Header Banner
+                VStack(spacing: 8) {
+                    ZStack {
+                        Circle()
+                            .fill(Color.blue.opacity(0.12))
+                            .frame(width: 64, height: 64)
+
+                        if gattClient.isDetectingChipset || gattClient.isProbing {
+                            ProgressView()
+                                .progressViewStyle(CircularProgressViewStyle(tint: .blue))
+                        } else {
+                            Image(systemName: "cpu")
+                                .font(.system(size: 28))
+                                .foregroundColor(.blue)
+                        }
+                    }
+
+                    Text("Auto-Detect Hardware ANC")
+                        .font(.system(size: 20, weight: .bold, design: .rounded))
+
+                    Text(gattClient.detectionStatusMessage)
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 24)
+                }
+                .padding(.top, 12)
+
+                // Currently Active / Identified Profile Card
+                if let profile = gattClient.activeProfile {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("ACTIVE PROFILE")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Text(profile.vendor.rawValue)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(.blue)
+                        }
+
+                        Text(profile.name)
+                            .font(.system(size: 15, weight: .bold))
+
+                        HStack(spacing: 8) {
+                            CapabilityPill(title: "Hardware ANC", isSupported: !profile.ancOnHex.isEmpty)
+                            CapabilityPill(title: "Transparency", isSupported: !profile.transparencyHex.isEmpty)
+                            CapabilityPill(title: "Hardware EQ", isSupported: profile.eqBassBoostHex != nil)
+                        }
+                    }
+                    .padding(14)
+                    .background(Color(uiColor: .secondarySystemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .padding(.horizontal, 16)
+                }
+
+                // Discovered Clone Devices List
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("NEARBY ACCESSORIES")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        if gattClient.isDetectingChipset {
+                            Text("Scanning...")
+                                .font(.system(size: 11))
+                                .foregroundColor(.blue)
+                        }
+                    }
+                    .padding(.horizontal, 18)
+
+                    if gattClient.discoveredCloneDevices.isEmpty {
+                        VStack(spacing: 8) {
+                            Text("No accessory discovered yet.")
+                                .font(.system(size: 13))
+                                .foregroundColor(.secondary)
+
+                            Button("Rescan Frequencies") {
+                                HapticFeedbackManager.shared.buttonTap()
+                                gattClient.startAutoDetectANCScan()
+                            }
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.blue)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 24)
+                    } else {
+                        List(gattClient.discoveredCloneDevices) { device in
+                            Button(action: {
+                                HapticFeedbackManager.shared.buttonTap()
+                                gattClient.connect(to: device.peripheral)
+                            }) {
+                                HStack {
+                                    Image(systemName: "airpodspro")
+                                        .font(.system(size: 18))
+                                        .foregroundColor(.primary)
+
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(device.name)
+                                            .font(.system(size: 14, weight: .bold))
+                                            .foregroundColor(.primary)
+
+                                        if let vendor = device.probableVendor {
+                                            Text(vendor.rawValue)
+                                                .font(.system(size: 11))
+                                                .foregroundColor(.blue)
+                                        } else {
+                                            Text("Signal: \(device.rssi) dBm")
+                                                .font(.system(size: 11))
+                                                .foregroundColor(.secondary)
+                                        }
+                                    }
+
+                                    Spacer()
+
+                                    Text("Connect")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundColor(.white)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 6)
+                                        .background(Color.blue)
+                                        .clipShape(Capsule())
+                                }
+                            }
+                        }
+                        .listStyle(PlainListStyle())
+                    }
+                }
+
+                Spacer()
+            }
+            .navigationBarItems(trailing: Button("Done") { dismiss() })
+        }
+    }
+}
+
+private struct CapabilityPill: View {
+    let title: String
+    let isSupported: Bool
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: isSupported ? "checkmark.circle.fill" : "xmark.circle")
+                .font(.system(size: 9))
+                .foregroundColor(isSupported ? .green : .secondary)
+
+            Text(title)
+                .font(.system(size: 10, weight: .semibold))
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(isSupported ? Color.green.opacity(0.12) : Color.secondary.opacity(0.12))
+        .clipShape(Capsule())
     }
 }
 

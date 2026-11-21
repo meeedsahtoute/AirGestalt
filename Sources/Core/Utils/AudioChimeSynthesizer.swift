@@ -2,8 +2,8 @@
 //  AudioChimeSynthesizer.swift
 //  AirGestalt
 //
-//  Synthesizes soft Apple-style mode switch chimes directly using PCM audio.
-//  Zero external sound asset dependencies.
+//  Synthesizes soft Apple-style mode switch chimes directly using PCM stereo audio.
+//  Zero external sound asset dependencies. Fully channel-matched and converter-protected.
 //
 
 import Foundation
@@ -34,7 +34,7 @@ public final class AudioChimeSynthesizer {
         }
 
         if let pcm = buffer {
-            SharedAudioEngine.shared.playerNode.scheduleBuffer(pcm, at: nil, options: [], completionHandler: nil)
+            SharedAudioEngine.shared.scheduleBufferSafely(pcm)
         }
     }
 
@@ -51,7 +51,7 @@ public final class AudioChimeSynthesizer {
             samples[i] = Float(sin(phase) * envelope * 0.35)
         }
 
-        return createBuffer(from: samples)
+        return createStereoBuffer(from: samples)
     }
 
     private func synthesizeHarmonicBell(fundamental: Double, duration: Double) -> AVAudioPCMBuffer? {
@@ -67,16 +67,19 @@ public final class AudioChimeSynthesizer {
             samples[i] = Float((f1 + f2 + f3) * decay)
         }
 
-        return createBuffer(from: samples)
+        return createStereoBuffer(from: samples)
     }
 
-    private func createBuffer(from samples: [Float]) -> AVAudioPCMBuffer? {
-        let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
-        guard let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count)) else { return nil }
+    private func createStereoBuffer(from samples: [Float]) -> AVAudioPCMBuffer? {
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2),
+              let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count)) else {
+            return nil
+        }
         pcm.frameLength = AVAudioFrameCount(samples.count)
 
-        if let channel = pcm.floatChannelData?[0] {
-            memcpy(channel, samples, samples.count * MemoryLayout<Float>.size)
+        if let left = pcm.floatChannelData?[0], let right = pcm.floatChannelData?[1] {
+            memcpy(left, samples, samples.count * MemoryLayout<Float>.size)
+            memcpy(right, samples, samples.count * MemoryLayout<Float>.size)
         }
         return pcm
     }

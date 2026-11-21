@@ -223,6 +223,7 @@ public enum ChipsetVendor: String, CaseIterable, Identifiable, Codable {
     case bes = "Bestechnic (BES)"
     case bluetrum = "Bluetrum (AB)"
     case huilian = "Huilian (Starlink)"
+    case jl = "JieLi / Jerry (JL)"
     case qualcomm = "Qualcomm (QCC)"
     case custom = "Custom / Reverse-Engineered"
 
