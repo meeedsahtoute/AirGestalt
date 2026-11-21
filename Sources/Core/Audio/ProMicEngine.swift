@@ -6,7 +6,7 @@
 //  Features:
 //  1. Anti-HFP Studio Routing with live A/B switch (iPhone Studio Mic vs Native Earbud Mic)
 //  2. Apple Hardware Voice Processing & AGC (inputNode)
-//  3. Broadcast Vocal DSP Chain: 85Hz High-Pass, vDSP Adaptive Noise Gate, Warmth EQ & Dynamics Compressor
+//  3. Broadcast Vocal DSP Chain: 85Hz High-Pass, vDSP Adaptive Noise Gate, Warmth EQ & SIMD Dynamics Compressor
 //  4. Real-time VU/dB Meter and 10-Second Voice Note Recorder with DSP ON/OFF comparison.
 //
 
@@ -33,9 +33,17 @@ public final class ProMicEngine: NSObject, ObservableObject, AVAudioPlayerDelega
     @Published public var isDspEnabledForPlayback: Bool = true
     @Published public var comparisonPlaybackProgress: Double = 0.0
 
-    // MARK: - Audio Processing Nodes
+    // MARK: - Audio Processing Nodes & Filters
     public let vocalEQ = AVAudioUnitEQ(numberOfBands: 3)
-    public let compressor = AVAudioUnitDynamicsProcessor()
+
+    // Broadcast Dynamics Compressor State (SIMD vDSP)
+    public var isCompressorBypassed: Bool = true
+    public var compressorThresholdDb: Float = -18.0
+    public var compressorRatio: Float = 2.0
+    public var compressorMakeupGainDb: Float = 3.2
+    private var compressorEnvelope: Float = 0.0
+    private let compressorAttack: Float = 0.05
+    private let compressorRelease: Float = 0.01
 
     // Adaptive Noise Gate state
     private var gateThresholdRMS: Float = 0.015
@@ -79,13 +87,10 @@ public final class ProMicEngine: NSObject, ObservableObject, AVAudioPlayerDelega
         deEssBand.gain = -2.2
         deEssBand.bypass = false
 
-        // Broadcast Dynamics Compressor
-        compressor.threshold = -18.0 // dB
-        compressor.headRoom = 5.0    // dB
-        compressor.expansionRatio = 2.0
-        compressor.attackTime = 0.003 // 3ms
-        compressor.releaseTime = 0.100 // 100ms
-        compressor.masterGain = 3.2   // +3.2 dB makeup gain
+        // Dynamics Compressor parameters
+        compressorThresholdDb = -18.0
+        compressorRatio = 2.0
+        compressorMakeupGainDb = 3.2
     }
 
     // MARK: - Hardware Voice Processing Configuration
@@ -111,21 +116,21 @@ public final class ProMicEngine: NSObject, ObservableObject, AVAudioPlayerDelega
         case .standard:
             inputNode.isVoiceProcessingBypassed = true
             vocalEQ.bypass = true
-            compressor.bypass = true
+            isCompressorBypassed = true
         case .voiceIsolation:
             inputNode.isVoiceProcessingBypassed = false
             inputNode.isVoiceProcessingAGCEnabled = true
             vocalEQ.bypass = true
-            compressor.bypass = true
+            isCompressorBypassed = true
         case .wideSpectrum:
             inputNode.isVoiceProcessingBypassed = true
             vocalEQ.bypass = true
-            compressor.bypass = true
+            isCompressorBypassed = true
         case .studioBroadcast:
             inputNode.isVoiceProcessingBypassed = false
             inputNode.isVoiceProcessingAGCEnabled = true
             vocalEQ.bypass = false
-            compressor.bypass = false
+            isCompressorBypassed = false
         }
     }
 
@@ -138,7 +143,7 @@ public final class ProMicEngine: NSObject, ObservableObject, AVAudioPlayerDelega
         }
     }
 
-    // MARK: - Real-Time VU Meter & vDSP Noise Gate
+    // MARK: - Real-Time VU Meter, vDSP Noise Gate & Dynamics Compressor
 
     public func processMicrophoneBuffer(_ buffer: AVAudioPCMBuffer) {
         guard let channelData = buffer.floatChannelData else { return }
@@ -161,6 +166,24 @@ public final class ProMicEngine: NSObject, ObservableObject, AVAudioPlayerDelega
         // Apply gate attenuation via vDSP_vsmul
         var currentGain = gateGain
         vDSP_vsmul(samples, 1, &currentGain, samples, 1, vDSP_Length(frameCount))
+
+        // 3. Broadcast Dynamics Compression (vDSP)
+        if !isCompressorBypassed {
+            let peakSample = abs(samples[0])
+            let targetEnv = peakSample
+            let envCoeff = (targetEnv > compressorEnvelope) ? compressorAttack : compressorRelease
+            compressorEnvelope = (compressorEnvelope * (1.0 - envCoeff)) + (targetEnv * envCoeff)
+
+            let envDb = 20.0 * log10(max(1e-5, compressorEnvelope))
+            var gainReductionDb: Float = 0.0
+            if envDb > compressorThresholdDb {
+                gainReductionDb = (envDb - compressorThresholdDb) * (1.0 - (1.0 / compressorRatio))
+            }
+
+            let totalGainDb = compressorMakeupGainDb - gainReductionDb
+            var linearGain = pow(10.0, totalGainDb / 20.0)
+            vDSP_vsmul(samples, 1, &linearGain, samples, 1, vDSP_Length(frameCount))
+        }
 
         DispatchQueue.main.async {
             self.vuMeterLevel = normalizedVU
