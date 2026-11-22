@@ -37,6 +37,9 @@ jobs:
       - name: Generate Xcode Project
         run: xcodegen generate
 
+      - name: Run Audio DSP Self-Test Suite
+        run: swift scripts/run_dsp_self_tests.swift
+
       - name: Build AirGestaltCore (LiveContainer Compatible)
         run: |
           xcodebuild clean build \

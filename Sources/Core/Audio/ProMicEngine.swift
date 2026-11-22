@@ -118,42 +118,50 @@ public final class ProMicEngine: NSObject, ObservableObject, AVAudioPlayerDelega
     public func setMicMode(_ mode: VoiceMicMode) {
         self.activeMicMode = mode
 
-        guard GhostAudioEngine.shared.isRunning, let engine = GhostAudioEngine.shared.engine else { return }
-        let inputNode = engine.inputNode
         switch mode {
         case .standard:
-            inputNode.isVoiceProcessingBypassed = true
             vocalEQ?.bypass = true
             isCompressorBypassed = true
+            gateThresholdRMS = 0.005
+            GhostAudioEngine.shared.updateLiveEQGain(bandIndex: 0, gain: 0.0)
+            GhostAudioEngine.shared.updateLiveEQGain(bandIndex: 6, gain: 0.0)
+            GhostAudioEngine.shared.updateLiveEQGain(bandIndex: 7, gain: 0.0)
+
         case .voiceIsolation:
-            inputNode.isVoiceProcessingBypassed = false
-            inputNode.isVoiceProcessingAGCEnabled = true
-            vocalEQ?.bypass = true
+            if vocalEQ == nil { setupVocalDSPChain() }
+            vocalEQ?.bypass = false
             isCompressorBypassed = true
+            gateThresholdRMS = 0.022 // Tight noise gate to cut ambient room noise
+            // Vocal Clarity presence boost
+            GhostAudioEngine.shared.updateLiveEQGain(bandIndex: 0, gain: -6.0) // 32Hz rumble cut
+            GhostAudioEngine.shared.updateLiveEQGain(bandIndex: 1, gain: -4.0) // 64Hz rumble cut
+            GhostAudioEngine.shared.updateLiveEQGain(bandIndex: 6, gain: 4.5)  // 2kHz voice presence
+            GhostAudioEngine.shared.updateLiveEQGain(bandIndex: 7, gain: 3.5)  // 4kHz consonant clarity
+
         case .wideSpectrum:
-            inputNode.isVoiceProcessingBypassed = true
             vocalEQ?.bypass = true
             isCompressorBypassed = true
+            gateThresholdRMS = 0.0 // Gate wide open
+            GhostAudioEngine.shared.updateLiveEQGain(bandIndex: 0, gain: 2.0)
+            GhostAudioEngine.shared.updateLiveEQGain(bandIndex: 1, gain: 2.0)
+            GhostAudioEngine.shared.updateLiveEQGain(bandIndex: 8, gain: 3.0)
+
         case .studioBroadcast:
-            inputNode.isVoiceProcessingBypassed = false
-            inputNode.isVoiceProcessingAGCEnabled = true
-            if vocalEQ == nil {
-                setupVocalDSPChain()
-            }
+            if vocalEQ == nil { setupVocalDSPChain() }
             vocalEQ?.bypass = false
             isCompressorBypassed = false
+            gateThresholdRMS = 0.012
+            // Broadcast warmth & dynamics
+            GhostAudioEngine.shared.updateLiveEQGain(bandIndex: 0, gain: -4.0)
+            GhostAudioEngine.shared.updateLiveEQGain(bandIndex: 5, gain: 2.0)  // 1kHz warmth
+            GhostAudioEngine.shared.updateLiveEQGain(bandIndex: 6, gain: 3.0)  // 2kHz presence
+            GhostAudioEngine.shared.updateLiveEQGain(bandIndex: 7, gain: 2.5)  // 4kHz clarity
         }
     }
 
     public func toggleMicrophoneSource(useEarbudMic: Bool) {
         self.isUsingEarbudMic = useEarbudMic
-        if GhostAudioEngine.shared.isRunning {
-            do {
-                try GhostAudioEngine.shared.configureAudioSession(mode: .voiceChat, forceEarbudMic: useEarbudMic)
-            } catch {
-                print("Failed to switch audio session microphone route: \(error)")
-            }
-        }
+        GhostAudioEngine.shared.setMicrophoneInput(useEarbudMic: useEarbudMic)
     }
 
     // MARK: - Real-Time VU Meter, vDSP Noise Gate & Dynamics Compressor

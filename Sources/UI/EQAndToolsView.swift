@@ -12,6 +12,7 @@ public struct EQAndToolsView: View {
     @ObservedObject var spatialDSP = SpatialDSPEngine.shared
     @ObservedObject var gattClient = CloneGATTClient.shared
     @ObservedObject var audioEngine = GhostAudioEngine.shared
+    @State private var isShowingDSPDiagnostics: Bool = false
 
     public init() {}
 
@@ -103,6 +104,85 @@ public struct EQAndToolsView: View {
                             }
                         }
                         .padding(.vertical, 8)
+                    }
+
+                    Divider()
+                        .padding(.vertical, 4)
+
+                    // Real-Time Acoustic Enhancements (Bass Boost + Spatial Width)
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("REAL-TIME ACOUSTIC ENHANCEMENTS")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(.secondary)
+
+                            Spacer()
+
+                            // Diagnostic Self-Test Sheet Button
+                            Button(action: {
+                                HapticFeedbackManager.shared.buttonTap()
+                                isShowingDSPDiagnostics = true
+                            }) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "checkmark.seal.fill")
+                                    Text("DSP Self-Test")
+                                }
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundColor(.cyan)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.cyan.opacity(0.12))
+                                .clipShape(Capsule())
+                            }
+                        }
+
+                        HStack(spacing: 12) {
+                            // Bass Boost Button
+                            Button(action: {
+                                HapticFeedbackManager.shared.buttonTap()
+                                audioEngine.setBassBoostActive(!audioEngine.isBassBoostActive)
+                            }) {
+                                HStack(spacing: 6) {
+                                    Image(systemName: audioEngine.isBassBoostActive ? "waveform.badge.plus" : "waveform")
+                                        .font(.system(size: 13, weight: .bold))
+                                    Text(audioEngine.isBassBoostActive ? "Bass Boost ON" : "Bass Boost (+6dB)")
+                                        .font(.system(size: 11, weight: .bold))
+                                }
+                                .foregroundColor(audioEngine.isBassBoostActive ? .white : .primary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                                .background(audioEngine.isBassBoostActive ? Color.cyan : Color(uiColor: .tertiarySystemBackground))
+                                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            }
+
+                            // Spatial Widening Amount Slider
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack {
+                                    Text("Spatial Width:")
+                                        .font(.system(size: 10, weight: .medium))
+                                        .foregroundColor(.secondary)
+                                    Spacer()
+                                    Text(String(format: "%.0f%%", audioEngine.spatialWideningAmount))
+                                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                        .foregroundColor(.cyan)
+                                }
+
+                                Slider(
+                                    value: Binding(
+                                        get: { self.audioEngine.spatialWideningAmount },
+                                        set: { self.audioEngine.setSpatialWideningMix($0) }
+                                    ),
+                                    in: 0.0...50.0,
+                                    step: 1.0
+                                )
+                                .tint(.cyan)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(Color(uiColor: .tertiarySystemBackground))
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        }
                     }
                 }
                 .padding(16)
@@ -355,6 +435,9 @@ public struct EQAndToolsView: View {
         .safeAreaInset(edge: .top) {
             pinnedHeaderView
         }
+        .sheet(isPresented: $isShowingDSPDiagnostics) {
+            AudioDSPSelfTestSheet()
+        }
     }
 
     private var pinnedHeaderView: some View {
@@ -544,5 +627,115 @@ private struct AttitudeBadge: View {
         .frame(maxWidth: .infinity)
         .background(Color.purple.opacity(0.10))
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+}
+
+// MARK: - Audio DSP Diagnostic Self-Test Sheet
+
+private struct AudioDSPSelfTestSheet: View {
+    @ObservedObject var suite = AudioDSPSelfTestSuite.shared
+    @Environment(\.dismiss) var dismiss
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 16) {
+                // Header status
+                VStack(spacing: 8) {
+                    Image(systemName: suite.overallPassed ? "checkmark.seal.fill" : "gearshape.arrow.triangle.2.circlepath")
+                        .font(.system(size: 48))
+                        .foregroundColor(suite.overallPassed ? .green : .cyan)
+
+                    Text("Audio DSP Diagnostic Suite")
+                        .font(.system(size: 20, weight: .bold, design: .rounded))
+
+                    Text("Full automated test verification of every mode, slider, setting, and DSP transformation.")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 20)
+
+                    if !suite.testResults.isEmpty {
+                        Text("\(suite.passCount) / \(suite.totalCount) Tests Passed")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(suite.overallPassed ? .green : .orange)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 4)
+                            .background(suite.overallPassed ? Color.green.opacity(0.15) : Color.orange.opacity(0.15))
+                            .clipShape(Capsule())
+                    }
+                }
+                .padding(.top, 16)
+
+                // Results list
+                ScrollView {
+                    VStack(spacing: 10) {
+                        ForEach(suite.testResults) { result in
+                            HStack(alignment: .top, spacing: 10) {
+                                Image(systemName: result.passed ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                    .foregroundColor(result.passed ? .green : .red)
+                                    .font(.system(size: 16))
+                                    .padding(.top, 2)
+
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(result.name)
+                                        .font(.system(size: 13, weight: .bold))
+                                        .foregroundColor(.primary)
+
+                                    Text(result.details)
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.secondary)
+                                }
+
+                                Spacer()
+
+                                Text(result.passed ? "PASS" : "FAIL")
+                                    .font(.system(size: 10, weight: .heavy))
+                                    .foregroundColor(result.passed ? .green : .red)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .background(result.passed ? Color.green.opacity(0.12) : Color.red.opacity(0.12))
+                                    .clipShape(Capsule())
+                            }
+                            .padding(12)
+                            .background(Color(uiColor: .tertiarySystemBackground))
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                }
+
+                Spacer()
+
+                Button(action: {
+                    HapticFeedbackManager.shared.buttonTap()
+                    suite.runAllTests()
+                }) {
+                    HStack(spacing: 6) {
+                        if suite.isRunning {
+                            ProgressView()
+                                .tint(.white)
+                        } else {
+                            Image(systemName: "play.fill")
+                        }
+                        Text(suite.isRunning ? "Running Diagnostics..." : "Run Full Test Suite")
+                            .font(.system(size: 15, weight: .bold))
+                    }
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 50)
+                    .background(suite.isRunning ? Color.gray : Color.blue)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+                .disabled(suite.isRunning)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 16)
+            }
+            .navigationBarItems(trailing: Button("Done") { dismiss() })
+            .onAppear {
+                if suite.testResults.isEmpty {
+                    suite.runAllTests()
+                }
+            }
+        }
     }
 }

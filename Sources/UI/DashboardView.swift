@@ -227,43 +227,47 @@ public struct DashboardView: View {
 
                     // Real-Time Hardware GATT / Passthrough Status Line
                     HStack(spacing: 6) {
-                        if audioEngine.isSoftwareTransparencyActive {
-                            Circle()
-                                .fill(Color.cyan)
-                                .frame(width: 6, height: 6)
+                        Circle()
+                            .fill(audioEngine.activeNoiseControlMode != .off ? Color.cyan : (gattClient.isConnected ? Color.green : Color.secondary.opacity(0.6)))
+                            .frame(width: 6, height: 6)
 
+                        if audioEngine.activeNoiseControlMode == .transparency {
                             Text("Software Transparency Active (iPhone Mic -> Earbuds)")
                                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
                                 .foregroundColor(.cyan)
                                 .lineLimit(1)
+                        } else if audioEngine.activeNoiseControlMode == .adaptive {
+                            Text("Adaptive Audio Active (Dynamic Ambient Leveling)")
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .foregroundColor(.cyan)
+                                .lineLimit(1)
+                        } else if audioEngine.activeNoiseControlMode == .noiseCancellation {
+                            Text("Max ANC Active (Acoustic Masking & Isolation)")
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .foregroundColor(.cyan)
+                                .lineLimit(1)
+                        } else if gattClient.isConnected {
+                            Text(gattClient.lastGATTStatus)
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                        } else {
+                            Text("Hardware BLE: Disconnected • Software DSP Ready")
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                        }
 
-                            Spacer()
+                        Spacer()
 
-                            Text("5ms Latency")
+                        if audioEngine.activeNoiseControlMode != .off {
+                            Text(audioEngine.activeNoiseControlMode == .noiseCancellation ? "Masking ON" : "5ms Latency")
                                 .font(.system(size: 9, weight: .bold))
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
                                 .background(Color.cyan.opacity(0.18))
                                 .foregroundColor(.cyan)
                                 .clipShape(Capsule())
-                        } else {
-                            Circle()
-                                .fill(gattClient.isConnected ? Color.green : (gattClient.lastGATTStatus.hasPrefix("BLE Offline") ? Color.orange : Color.secondary.opacity(0.6)))
-                                .frame(width: 6, height: 6)
-
-                            if gattClient.isConnected || gattClient.lastGATTStatus.hasPrefix("BLE Offline") {
-                                Text(gattClient.lastGATTStatus)
-                                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                    .foregroundColor(gattClient.lastGATTStatus.hasPrefix("BLE Offline") ? .orange : .secondary)
-                                    .lineLimit(1)
-                            } else {
-                                Text("Hardware BLE: Disconnected • Software Passthrough Ready")
-                                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                    .foregroundColor(.secondary)
-                                    .lineLimit(1)
-                            }
-
-                            Spacer()
                         }
                     }
                     .padding(.horizontal, 4)
@@ -710,49 +714,23 @@ public struct DashboardView: View {
         HapticFeedbackManager.shared.modeChanged()
         dspProcessor.setNoiseMode(mode)
 
-        switch mode {
-        case .transparency:
-            // Software Transparency runs locally (built-in iPhone mic -> A2DP earbuds) without BLE
-            withAnimation {
-                showOfflineToast = false
-            }
-            audioEngine.setTransparencyActive(true)
-            audioEngine.setAmbientMonitoringActive(true)
-            if gattClient.isConnected {
-                gattClient.sendNoiseMode(.transparency)
-            }
+        withAnimation {
+            showOfflineToast = false
+        }
 
-        case .off:
-            // Cleanly stop software transparency and ambient monitoring
-            withAnimation {
-                showOfflineToast = false
-            }
-            audioEngine.setTransparencyActive(false)
-            audioEngine.setAmbientMonitoringActive(false)
-            if gattClient.isConnected {
-                gattClient.sendNoiseMode(.off)
-            } else {
-                gattClient.currentNoiseMode = .off
-                gattClient.lastGATTStatus = "Ready"
-            }
+        // Activate real acoustic DSP transformation on GhostAudioEngine
+        audioEngine.setNoiseControlMode(mode)
+
+        // Forward hardware GATT command to clone earbuds if connected
+        if gattClient.isConnected {
+            gattClient.sendNoiseMode(mode)
+        } else {
+            gattClient.currentNoiseMode = mode
+            gattClient.lastGATTStatus = "Ready"
+        }
+
+        if mode == .off {
             AudioChimeSynthesizer.shared.playModeSwitchChime(for: .off)
-
-        case .noiseCancellation, .adaptive:
-            // Hardware ANC & Adaptive require earbud DSP
-            audioEngine.setTransparencyActive(false)
-            audioEngine.setAmbientMonitoringActive(false)
-            if !gattClient.isConnected {
-                withAnimation {
-                    showOfflineToast = true
-                }
-                gattClient.sendNoiseMode(mode)
-            } else {
-                withAnimation {
-                    showOfflineToast = false
-                }
-                gattClient.sendNoiseMode(mode)
-            }
-            AudioChimeSynthesizer.shared.playModeSwitchChime(for: mode)
         }
     }
 }
@@ -1100,10 +1078,10 @@ private struct AcousticCalibratorSheet: View {
                         .font(.system(size: 64))
                         .foregroundColor(.blue)
 
-                    Text("Acoustic Latency Wizard")
+                    Text("Acoustic Wizard & Mic Auto-Gain")
                         .font(.system(size: 22, weight: .bold, design: .rounded))
 
-                    Text("Emits a 60ms logarithmic test chirp to synchronize vDSP anti-noise phase delay with your earbud's exact A2DP latency.")
+                    Text("Emits a 2-second acoustic sweep probe to lock A2DP phase delay and calibrate optimal microphone passthrough gain automatically.")
                         .font(.system(size: 13))
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
@@ -1124,20 +1102,36 @@ private struct AcousticCalibratorSheet: View {
                     }
                 }
 
-                // Measured Latency Display
-                VStack(spacing: 6) {
-                    Text(String(format: "%.1f ms", calibrator.effectiveTotalDelayMs))
-                        .font(.system(size: 44, weight: .heavy, design: .rounded))
-                        .foregroundColor(.primary)
+                // Measured Latency & Calibrated Gain Display
+                HStack(spacing: 12) {
+                    VStack(spacing: 4) {
+                        Text(String(format: "%.1f ms", calibrator.effectiveTotalDelayMs))
+                            .font(.system(size: 32, weight: .heavy, design: .rounded))
+                            .foregroundColor(.primary)
 
-                    Text("Locked Round-Trip Phase Delay")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.secondary)
+                        Text("Locked Phase Delay")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(16)
+                    .background(Color(uiColor: .secondarySystemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+                    VStack(spacing: 4) {
+                        Text(String(format: "%.2fx", calibrator.calibratedMicGain))
+                            .font(.system(size: 32, weight: .heavy, design: .rounded))
+                            .foregroundColor(.cyan)
+
+                        Text("Auto Mic Gain")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(16)
+                    .background(Color(uiColor: .secondarySystemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 }
-                .padding(20)
-                .frame(maxWidth: .infinity)
-                .background(Color(uiColor: .secondarySystemBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                 .padding(.horizontal, 24)
 
                 // Manual Fine-Tune Slider (-40ms to +40ms)
@@ -1161,7 +1155,7 @@ private struct AcousticCalibratorSheet: View {
                     HapticFeedbackManager.shared.buttonTap()
                     calibrator.startCalibration()
                 }) {
-                    Text(calibrator.isCalibrating ? "Calibrating..." : "Start 3-Second Calibration")
+                    Text(calibrator.isCalibrating ? "Calibrating..." : "Start 2-Second Calibration")
                         .font(.system(size: 16, weight: .bold))
                         .foregroundColor(.white)
                         .frame(maxWidth: .infinity)
