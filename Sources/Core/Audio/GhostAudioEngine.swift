@@ -44,6 +44,7 @@ public final class GhostAudioEngine: ObservableObject {
     // Single Serial Queue for 100% Race-Free Audio Mutations
     private let queue = DispatchQueue(label: "com.airgestalt.ghostengine.serial", qos: .userInitiated)
     private var testLoopBuffer: AVAudioPCMBuffer?
+    private var isMixerTapInstalled: Bool = false
 
     public static let isoFrequencies: [Float] = [
         32.0, 64.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0
@@ -77,6 +78,7 @@ public final class GhostAudioEngine: ObservableObject {
                 self.stopAnyEngine()
                 DispatchQueue.main.async {
                     self.isSoftwareTransparencyActive = false
+                    self.isAmbientMonitoringActive = false
                     self.statusMessage = "Transparency Off"
                 }
             }
@@ -91,6 +93,7 @@ public final class GhostAudioEngine: ObservableObject {
             DispatchQueue.main.async {
                 self.statusMessage = "Microphone access denied in Settings"
                 self.isSoftwareTransparencyActive = false
+                self.isAmbientMonitoringActive = false
             }
             return
         }
@@ -139,6 +142,12 @@ public final class GhostAudioEngine: ObservableObject {
 
             try newEngine.start()
 
+            // Stream mixer audio to VDSPAntiNoiseProcessor for live dB and FFT telemetry
+            newEngine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { buffer, _ in
+                _ = VDSPAntiNoiseProcessor.shared.processInputBuffer(buffer)
+            }
+            self.isMixerTapInstalled = true
+
             self.engine = newEngine
             self.eqNode = eq
             self.playerNode = nil
@@ -149,12 +158,14 @@ public final class GhostAudioEngine: ObservableObject {
             DispatchQueue.main.async {
                 self.isRunning = true
                 self.isSoftwareTransparencyActive = true
+                self.isAmbientMonitoringActive = true
                 self.statusMessage = "Live Transparency Active (iPhone Mic)"
             }
         } catch {
             stopAnyEngine()
             DispatchQueue.main.async {
                 self.isSoftwareTransparencyActive = false
+                self.isAmbientMonitoringActive = false
                 self.statusMessage = "Transparency Error: \(error.localizedDescription)"
             }
         }
@@ -241,6 +252,10 @@ public final class GhostAudioEngine: ObservableObject {
 
     private func stopAnyEngine() {
         if let eng = engine {
+            if isMixerTapInstalled {
+                eng.mainMixerNode.removeTap(onBus: 0)
+                isMixerTapInstalled = false
+            }
             playerNode?.stop()
             if eng.isRunning { eng.stop() }
             eng.reset()
@@ -250,6 +265,11 @@ public final class GhostAudioEngine: ObservableObject {
         eqNode = nil
         reverbNode = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+
+        DispatchQueue.main.async {
+            VDSPAntiNoiseProcessor.shared.ambientSPLdB = 0.0
+            VDSPAntiNoiseProcessor.shared.frequencySpectrum = Array(repeating: 0.0, count: 24)
+        }
     }
 
     // MARK: - 4. 10-Band EQ & Spatial Width Manipulation
@@ -329,6 +349,9 @@ public final class GhostAudioEngine: ObservableObject {
     public func scheduleBufferSafely(_ buffer: AVAudioPCMBuffer) {
         executeOnQueue { [weak self] in
             guard let self = self else { return }
+            // Never disrupt active live transparency
+            guard !self.isSoftwareTransparencyActive else { return }
+
             if self.engine == nil || self.engine?.isRunning == false {
                 self.startPlaybackEngine {
                     self.playerNode?.scheduleBuffer(buffer, at: nil, options: [], completionHandler: nil)
@@ -396,7 +419,20 @@ public final class GhostAudioEngine: ObservableObject {
 
     // Backward-Compatibility Helpers
     public func setGhostModeActive(_ active: Bool) { isGhostModeActive = active }
-    public func setAmbientMonitoringActive(_ active: Bool) { isAmbientMonitoringActive = active }
+    public func setAmbientMonitoringActive(_ active: Bool) {
+        DispatchQueue.main.async {
+            self.isAmbientMonitoringActive = active
+        }
+        if active {
+            if !self.isSoftwareTransparencyActive {
+                self.setTransparencyActive(true)
+            }
+        } else {
+            if self.isSoftwareTransparencyActive {
+                self.setTransparencyActive(false)
+            }
+        }
+    }
     public func configureAudioSession(mode: AVAudioSession.Mode = .default, forceEarbudMic: Bool = false) throws {}
     public func startEngine(mode: AVAudioSession.Mode = .default, forceEarbudMic: Bool = false) throws {
         if isSoftwareTransparencyActive { setTransparencyActive(true) } else { startPlaybackEngine() }

@@ -227,21 +227,43 @@ public struct DashboardView: View {
 
                     // Real-Time Hardware GATT / Passthrough Status Line
                     HStack(spacing: 6) {
-                        Circle()
-                            .fill(gattClient.isConnected ? Color.green : Color.blue)
-                            .frame(width: 6, height: 6)
-
-                        Text(gattClient.lastGATTStatus)
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-
-                        Spacer()
-
                         if audioEngine.isSoftwareTransparencyActive {
-                            Text("Software Passthrough ON")
+                            Circle()
+                                .fill(Color.cyan)
+                                .frame(width: 6, height: 6)
+
+                            Text("Software Transparency Active (iPhone Mic -> Earbuds)")
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .foregroundColor(.cyan)
+                                .lineLimit(1)
+
+                            Spacer()
+
+                            Text("5ms Latency")
                                 .font(.system(size: 9, weight: .bold))
-                                .foregroundColor(.blue)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.cyan.opacity(0.18))
+                                .foregroundColor(.cyan)
+                                .clipShape(Capsule())
+                        } else {
+                            Circle()
+                                .fill(gattClient.isConnected ? Color.green : (gattClient.lastGATTStatus.hasPrefix("BLE Offline") ? Color.orange : Color.secondary.opacity(0.6)))
+                                .frame(width: 6, height: 6)
+
+                            if gattClient.isConnected || gattClient.lastGATTStatus.hasPrefix("BLE Offline") {
+                                Text(gattClient.lastGATTStatus)
+                                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                    .foregroundColor(gattClient.lastGATTStatus.hasPrefix("BLE Offline") ? .orange : .secondary)
+                                    .lineLimit(1)
+                            } else {
+                                Text("Hardware BLE: Disconnected • Software Passthrough Ready")
+                                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                            }
+
+                            Spacer()
                         }
                     }
                     .padding(.horizontal, 4)
@@ -256,12 +278,16 @@ public struct DashboardView: View {
                                 .font(.system(size: 11, weight: .semibold))
                                 .foregroundColor(.secondary)
 
-                            if audioEngine.isAmbientMonitoringActive && dspProcessor.ambientSPLdB > 10.0 {
-                                Text(String(format: "Ambient Sound Level: %.1f dB SPL", dspProcessor.ambientSPLdB))
+                            if (audioEngine.isSoftwareTransparencyActive || audioEngine.isAmbientMonitoringActive) && dspProcessor.ambientSPLdB > 10.0 {
+                                Text(String(format: "Ambient Sound Level: %.1f dB SPL (Active)", dspProcessor.ambientSPLdB))
                                     .font(.system(size: 14, weight: .bold, design: .rounded))
                                     .foregroundColor(.primary)
+                            } else if (audioEngine.isSoftwareTransparencyActive || audioEngine.isAmbientMonitoringActive) {
+                                Text("Ambient Sound Level: Active (Listening...)")
+                                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                                    .foregroundColor(.cyan)
                             } else {
-                                Text(audioEngine.isAmbientMonitoringActive ? "Ambient Sound Level: Listening..." : "Ambient Sound Level: Inactive")
+                                Text("Ambient Sound Level: Inactive")
                                     .font(.system(size: 14, weight: .bold, design: .rounded))
                                     .foregroundColor(.secondary)
                             }
@@ -272,18 +298,27 @@ public struct DashboardView: View {
                         // Explicit Live Ambient Monitoring Toggle Button
                         Button(action: {
                             HapticFeedbackManager.shared.buttonTap()
-                            let newActive = !audioEngine.isAmbientMonitoringActive
-                            audioEngine.setAmbientMonitoringActive(newActive)
+                            let isCurrentlyActive = audioEngine.isSoftwareTransparencyActive || audioEngine.isAmbientMonitoringActive
+                            if isCurrentlyActive {
+                                audioEngine.setTransparencyActive(false)
+                                audioEngine.setAmbientMonitoringActive(false)
+                                dspProcessor.setNoiseMode(.off)
+                            } else {
+                                audioEngine.setTransparencyActive(true)
+                                audioEngine.setAmbientMonitoringActive(true)
+                                dspProcessor.setNoiseMode(.transparency)
+                            }
                         }) {
+                            let isCurrentlyActive = audioEngine.isSoftwareTransparencyActive || audioEngine.isAmbientMonitoringActive
                             HStack(spacing: 4) {
-                                Image(systemName: audioEngine.isAmbientMonitoringActive ? "stop.fill" : "waveform.badge.mic")
-                                Text(audioEngine.isAmbientMonitoringActive ? "Stop" : "Monitor")
+                                Image(systemName: isCurrentlyActive ? "stop.fill" : "waveform.badge.mic")
+                                Text(isCurrentlyActive ? "Stop" : "Monitor")
                             }
                             .font(.system(size: 12, weight: .semibold))
-                            .foregroundColor(audioEngine.isAmbientMonitoringActive ? .white : .blue)
+                            .foregroundColor(isCurrentlyActive ? .white : .blue)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)
-                            .background(audioEngine.isAmbientMonitoringActive ? Color.red : Color.blue.opacity(0.12))
+                            .background(isCurrentlyActive ? Color.red : Color.blue.opacity(0.12))
                             .clipShape(Capsule())
                         }
 
@@ -646,6 +681,8 @@ public struct DashboardView: View {
                 HapticFeedbackManager.shared.buttonTap()
                 audioEngine.setGhostModeActive(false)
                 audioEngine.setTransparencyActive(false)
+                audioEngine.setAmbientMonitoringActive(false)
+                dspProcessor.setNoiseMode(.off)
             }) {
                 Image(systemName: "power")
                     .font(.system(size: 11, weight: .bold))
@@ -673,31 +710,50 @@ public struct DashboardView: View {
         HapticFeedbackManager.shared.modeChanged()
         dspProcessor.setNoiseMode(mode)
 
-        if !gattClient.isConnected {
-            withAnimation {
-                showOfflineToast = true
-            }
-        } else {
+        switch mode {
+        case .transparency:
+            // Software Transparency runs locally (built-in iPhone mic -> A2DP earbuds) without BLE
             withAnimation {
                 showOfflineToast = false
             }
-        }
-
-        // Send hardware GATT command to clone earbuds if connected
-        gattClient.sendNoiseMode(mode)
-
-        // Real Software Transparency:
-        // When Transparency is selected, route iPhone microphone -> 10-band EQ -> Varispeed -> earbuds
-        if mode == .transparency {
             audioEngine.setTransparencyActive(true)
-        } else {
-            if audioEngine.isSoftwareTransparencyActive {
-                audioEngine.setTransparencyActive(false)
+            audioEngine.setAmbientMonitoringActive(true)
+            if gattClient.isConnected {
+                gattClient.sendNoiseMode(.transparency)
             }
-        }
 
-        // Play authentic Apple-style mode switch chime
-        AudioChimeSynthesizer.shared.playModeSwitchChime(for: mode)
+        case .off:
+            // Cleanly stop software transparency and ambient monitoring
+            withAnimation {
+                showOfflineToast = false
+            }
+            audioEngine.setTransparencyActive(false)
+            audioEngine.setAmbientMonitoringActive(false)
+            if gattClient.isConnected {
+                gattClient.sendNoiseMode(.off)
+            } else {
+                gattClient.currentNoiseMode = .off
+                gattClient.lastGATTStatus = "Ready"
+            }
+            AudioChimeSynthesizer.shared.playModeSwitchChime(for: .off)
+
+        case .noiseCancellation, .adaptive:
+            // Hardware ANC & Adaptive require earbud DSP
+            audioEngine.setTransparencyActive(false)
+            audioEngine.setAmbientMonitoringActive(false)
+            if !gattClient.isConnected {
+                withAnimation {
+                    showOfflineToast = true
+                }
+                gattClient.sendNoiseMode(mode)
+            } else {
+                withAnimation {
+                    showOfflineToast = false
+                }
+                gattClient.sendNoiseMode(mode)
+            }
+            AudioChimeSynthesizer.shared.playModeSwitchChime(for: mode)
+        }
     }
 }
 
