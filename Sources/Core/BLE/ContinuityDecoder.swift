@@ -36,7 +36,7 @@ public final class ContinuityDecoder: NSObject, ObservableObject {
     @Published public var discoveredPeripherals: [CBPeripheral] = []
 
     // MARK: - Internal Engine State
-    private var centralManager: CBCentralManager!
+    private var centralManager: CBCentralManager?
     private var smoothedRSSIByDevice: [String: Double] = [:]
     private var lastLidOpenCountByDevice: [String: UInt8] = [:]
     private var fallbackPeripheral: CBPeripheral?
@@ -64,7 +64,7 @@ public final class ContinuityDecoder: NSObject, ObservableObject {
     // MARK: - Public Interface
 
     public func startScanning() {
-        guard centralManager.state == .poweredOn else { return }
+        guard let central = centralManager, central.state == .poweredOn else { return }
 
         // We scan with allowDuplicates to receive continuous RSSI and lid open updates
         let scanOptions: [String: Any] = [
@@ -72,12 +72,12 @@ public final class ContinuityDecoder: NSObject, ObservableObject {
         ]
 
         // Scanning with nil serviceUUIDs in foreground captures Apple manufacturer advertisements
-        centralManager.scanForPeripherals(withServices: nil, options: scanOptions)
+        central.scanForPeripherals(withServices: nil, options: scanOptions)
         isScanning = true
     }
 
     public func stopScanning() {
-        centralManager.stopScan()
+        centralManager?.stopScan()
         isScanning = false
     }
 

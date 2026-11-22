@@ -2,10 +2,9 @@
 //  SharedAudioEngine.swift
 //  AirGestalt
 //
-//  Single Shared AVAudioEngine & Resilient Audio Session Coordinator.
-//  Protects against format and channel-count mismatches, handles route changes dynamically,
-//  integrates 10-band parametric EQ, zero-latency software transparency,
-//  and provides converter-backed safe buffer scheduling.
+//  Single Shared On-Demand AVAudioEngine & Resilient Audio Session Coordinator.
+//  100% Strictly Lazy: Zero audio session or hardware initialization on app launch or tab switching.
+//  Preserves background music (Spotify / Apple Music) in pristine A2DP stereo fidelity.
 //
 
 import Foundation
@@ -15,16 +14,16 @@ import Combine
 public final class SharedAudioEngine: ObservableObject {
     public static let shared = SharedAudioEngine()
 
-    public let engine = AVAudioEngine()
-    public let playerNode = AVAudioPlayerNode()
-    public let eqNode = AVAudioUnitEQ(numberOfBands: 10)
-    public let transparencyMixer = AVAudioMixerNode()
-    public let mainMixer: AVAudioMixerNode
+    // Strictly lazy audio engine & nodes (nil when inactive)
+    public var engine: AVAudioEngine?
+    public var playerNode: AVAudioPlayerNode?
+    public var eqNode: AVAudioUnitEQ?
+    public var transparencyMixer: AVAudioMixerNode?
 
     @Published public var isRunning: Bool = false
     @Published public var currentInputSampleRate: Double = 48000.0
     @Published public var preferredMicPort: String = "Built-In Microphone"
-    @Published public var activeOutputDeviceName: String = "Built-In Speaker"
+    @Published public var activeOutputDeviceName: String = "AirPods Pro"
     @Published public var isUsingEarbudMic: Bool = false
     @Published public var inputChannelCount: Int = 1
     @Published public var isSoftwareTransparencyActive: Bool = false
@@ -37,41 +36,11 @@ public final class SharedAudioEngine: ObservableObject {
     public static let canonicalFormat = AVAudioFormat(standardFormatWithSampleRate: 48000.0, channels: 2)
 
     private init() {
-        self.mainMixer = engine.mainMixerNode
-
-        // Attach audio processing nodes to engine graph
-        engine.attach(playerNode)
-        engine.attach(eqNode)
-        engine.attach(transparencyMixer)
-
-        // Initialize transparency mixer to muted by default
-        transparencyMixer.outputVolume = 0.0
-
-        // Wire playback chain: playerNode -> eqNode -> mainMixer
-        wirePlaybackNodes()
-
-        // Wire transparency chain: transparencyMixer -> mainMixer
-        if let canonical = SharedAudioEngine.canonicalFormat {
-            engine.connect(transparencyMixer, to: mainMixer, format: canonical)
-        } else {
-            engine.connect(transparencyMixer, to: mainMixer, format: nil)
-        }
-
+        // Zero audio hardware or session interaction on launch.
         setupNotificationObservers()
-        updateActiveRoute()
     }
 
-    private func wirePlaybackNodes() {
-        if let canonical = SharedAudioEngine.canonicalFormat {
-            engine.connect(playerNode, to: eqNode, format: canonical)
-            engine.connect(eqNode, to: mainMixer, format: canonical)
-        } else {
-            engine.connect(playerNode, to: eqNode, format: nil)
-            engine.connect(eqNode, to: mainMixer, format: nil)
-        }
-    }
-
-    // MARK: - Safe Audio Session Configuration
+    // MARK: - Safe Audio Session Configuration (Strictly On-Demand)
 
     public func configureAudioSession(forceEarbudMic: Bool = false) throws {
         let session = AVAudioSession.sharedInstance()
@@ -79,7 +48,7 @@ public final class SharedAudioEngine: ObservableObject {
 
         // Non-interrupting mixing options:
         // Strictly avoid .allowBluetooth (which forces HFP 16kHz call mode and pauses background music)
-        // unless forceEarbudMic is explicitly requested.
+        // unless forceEarbudMic is explicitly requested for earbud mic passthrough.
         var sessionOptions: AVAudioSession.CategoryOptions = [
             .mixWithOthers,
             .allowBluetoothA2DP,
@@ -114,26 +83,74 @@ public final class SharedAudioEngine: ObservableObject {
     }
 
     public func updateActiveRoute() {
+        guard isRunning else {
+            DispatchQueue.main.async {
+                if let name = CloneGATTClient.shared.connectedPeripheralName {
+                    self.activeOutputDeviceName = name
+                } else {
+                    self.activeOutputDeviceName = "AirPods Pro"
+                }
+            }
+            return
+        }
+
         let session = AVAudioSession.sharedInstance()
-        let portName = session.currentRoute.outputs.first?.portName ?? "Built-In Speaker"
+        let portName = session.currentRoute.outputs.first?.portName ?? "AirPods Pro"
         DispatchQueue.main.async {
             self.activeOutputDeviceName = portName
         }
     }
 
-    // MARK: - Engine Lifecycle
+    // MARK: - On-Demand Engine Lifecycle
 
-    public func startEngine() throws {
-        guard !engine.isRunning else { return }
+    public func startEngine(forceEarbudMic: Bool = false) throws {
+        guard !isRunning else { return }
 
-        try configureAudioSession(forceEarbudMic: isUsingEarbudMic)
+        // 1. Configure audio session FIRST with non-interrupting mixing options
+        try configureAudioSession(forceEarbudMic: forceEarbudMic)
 
-        ensureNodesConnected()
+        // 2. Lazily instantiate audio engine and nodes
+        let newEngine = AVAudioEngine()
+        let newPlayer = AVAudioPlayerNode()
+        let newEQ = AVAudioUnitEQ(numberOfBands: 10)
+        let newTransparencyMixer = AVAudioMixerNode()
 
-        try engine.start()
-        if !playerNode.isPlaying {
-            playerNode.play()
+        self.engine = newEngine
+        self.playerNode = newPlayer
+        self.eqNode = newEQ
+        self.transparencyMixer = newTransparencyMixer
+
+        // Apply 10-band EQ frequencies & gains
+        setup10BandEQ(on: newEQ)
+
+        // Attach nodes to graph
+        newEngine.attach(newPlayer)
+        newEngine.attach(newEQ)
+        newEngine.attach(newTransparencyMixer)
+
+        newTransparencyMixer.outputVolume = isSoftwareTransparencyActive ? transparencyGain : 0.0
+
+        let mainMixer = newEngine.mainMixerNode
+        if let canonical = SharedAudioEngine.canonicalFormat {
+            newEngine.connect(newPlayer, to: newEQ, format: canonical)
+            newEngine.connect(newEQ, to: mainMixer, format: canonical)
+            newEngine.connect(newTransparencyMixer, to: mainMixer, format: canonical)
+        } else {
+            newEngine.connect(newPlayer, to: newEQ, format: nil)
+            newEngine.connect(newEQ, to: mainMixer, format: nil)
+            newEngine.connect(newTransparencyMixer, to: mainMixer, format: nil)
         }
+
+        // Connect inputNode to transparency mixer safely
+        let inputNode = newEngine.inputNode
+        let inputFormat = inputNode.outputFormat(forBus: 0)
+        if inputFormat.sampleRate > 0 && inputFormat.channelCount > 0 {
+            newEngine.connect(inputNode, to: newTransparencyMixer, format: inputFormat)
+        }
+
+        // 3. Start engine and player
+        try newEngine.start()
+        newPlayer.play()
 
         installInputTapSafely()
 
@@ -145,12 +162,20 @@ public final class SharedAudioEngine: ObservableObject {
     public func stopEngine() {
         engineQueue.async { [weak self] in
             guard let self = self else { return }
-            if self.engine.isRunning {
+
+            if let engine = self.engine {
                 self.removeInputTapSafely()
-                self.playerNode.stop()
-                self.engine.stop()
+                self.playerNode?.stop()
+                engine.stop()
+                self.engine = nil
+                self.playerNode = nil
+                self.eqNode = nil
+                self.transparencyMixer = nil
             }
+
+            // Clean Deactivation: Tell iOS to restore full priority to background music apps
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+
             DispatchQueue.main.async {
                 self.isRunning = false
                 self.isSoftwareTransparencyActive = false
@@ -161,22 +186,20 @@ public final class SharedAudioEngine: ObservableObject {
         }
     }
 
-    private func ensureNodesConnected() {
-        let targetFormat = playerNode.outputFormat(forBus: 0)
-        if targetFormat.channelCount == 0 || targetFormat.sampleRate == 0 {
-            wirePlaybackNodes()
-        }
-
-        // Check and safely wire inputNode to transparencyMixer
-        let inputNode = engine.inputNode
-        let inputFormat = inputNode.outputFormat(forBus: 0)
-        if inputFormat.sampleRate > 0 && inputFormat.channelCount > 0 {
-            engine.disconnectNodeOutput(inputNode)
-            engine.connect(inputNode, to: transparencyMixer, format: inputFormat)
+    private func setup10BandEQ(on eq: AVAudioUnitEQ) {
+        let currentGains = SpatialDSPEngine.shared.currentGains
+        for (index, freq) in SpatialDSPEngine.isoFrequencies.enumerated() {
+            guard index < eq.bands.count else { break }
+            let band = eq.bands[index]
+            band.frequency = freq
+            band.bandwidth = 1.0 // 1 octave
+            band.filterType = .parametric
+            band.bypass = false
+            band.gain = (index < currentGains.count) ? currentGains[index] : 0.0
         }
     }
 
-    // MARK: - Real Software Low-Latency Transparency
+    // MARK: - On-Demand Software Transparency
 
     public func setTransparencyActive(_ active: Bool, gain: Float = 1.0) {
         let safeGain = max(0.0, min(1.5, gain))
@@ -187,17 +210,16 @@ public final class SharedAudioEngine: ObservableObject {
             guard let self = self else { return }
 
             if active {
-                if !self.engine.isRunning {
+                if !self.isRunning || self.engine == nil {
                     do {
-                        try self.startEngine()
+                        try self.startEngine(forceEarbudMic: self.isUsingEarbudMic)
                     } catch {
                         print("SharedAudioEngine: Failed to start for transparency: \(error)")
                     }
                 }
-                self.ensureNodesConnected()
-                self.transparencyMixer.outputVolume = safeGain
+                self.transparencyMixer?.outputVolume = safeGain
             } else {
-                self.transparencyMixer.outputVolume = 0.0
+                self.transparencyMixer?.outputVolume = 0.0
                 if !self.isAmbientMonitoringActive {
                     self.stopEngine()
                 }
@@ -209,16 +231,16 @@ public final class SharedAudioEngine: ObservableObject {
         }
     }
 
-    // MARK: - Ambient dB Monitoring
+    // MARK: - On-Demand Ambient dB Monitoring
 
     public func setAmbientMonitoringActive(_ active: Bool) {
         self.isAmbientMonitoringActive = active
         engineQueue.async { [weak self] in
             guard let self = self else { return }
             if active {
-                if !self.engine.isRunning {
+                if !self.isRunning || self.engine == nil {
                     do {
-                        try self.startEngine()
+                        try self.startEngine(forceEarbudMic: self.isUsingEarbudMic)
                     } catch {
                         print("Failed to start engine for ambient monitoring: \(error)")
                     }
@@ -237,40 +259,40 @@ public final class SharedAudioEngine: ObservableObject {
         engineQueue.async { [weak self] in
             guard let self = self else { return }
 
-            if !self.engine.isRunning {
+            if !self.isRunning || self.engine == nil {
                 do {
-                    try self.startEngine()
+                    try self.startEngine(forceEarbudMic: self.isUsingEarbudMic)
                 } catch {
                     print("SharedAudioEngine start error: \(error)")
                     return
                 }
             }
 
-            self.ensureNodesConnected()
+            guard let player = self.playerNode, let engine = self.engine, engine.isRunning else { return }
 
-            let outputFormat = self.playerNode.outputFormat(forBus: 0)
+            let outputFormat = player.outputFormat(forBus: 0)
             guard outputFormat.channelCount > 0, outputFormat.sampleRate > 0 else { return }
 
             // 1. Direct match
             if buffer.format.channelCount == outputFormat.channelCount &&
                abs(buffer.format.sampleRate - outputFormat.sampleRate) < 1.0 {
-                self.playerNode.scheduleBuffer(buffer, at: nil, options: [], completionHandler: nil)
-                if !self.playerNode.isPlaying { self.playerNode.play() }
+                player.scheduleBuffer(buffer, at: nil, options: [], completionHandler: nil)
+                if !player.isPlaying { player.play() }
                 return
             }
 
             // 2. Hardware channel mismatch conversion (Mono to Stereo or Rate Conversion)
             if let converted = self.convertBuffer(buffer, to: outputFormat) {
-                self.playerNode.scheduleBuffer(converted, at: nil, options: [], completionHandler: nil)
-                if !self.playerNode.isPlaying { self.playerNode.play() }
+                player.scheduleBuffer(converted, at: nil, options: [], completionHandler: nil)
+                if !player.isPlaying { player.play() }
                 return
             }
 
             // 3. Fallback stereo channel duplication
             if outputFormat.channelCount == 2 && buffer.format.channelCount == 1 {
                 if let stereo = self.createStereoBuffer(fromMono: buffer, targetFormat: outputFormat) {
-                    self.playerNode.scheduleBuffer(stereo, at: nil, options: [], completionHandler: nil)
-                    if !self.playerNode.isPlaying { self.playerNode.play() }
+                    player.scheduleBuffer(stereo, at: nil, options: [], completionHandler: nil)
+                    if !player.isPlaying { player.play() }
                 }
             }
         }
@@ -322,7 +344,7 @@ public final class SharedAudioEngine: ObservableObject {
     // MARK: - Dynamic Input Tap Management
 
     public func installInputTapSafely() {
-        guard !isTapInstalled else { return }
+        guard let engine = self.engine, !isTapInstalled else { return }
 
         let inputNode = engine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
@@ -360,7 +382,7 @@ public final class SharedAudioEngine: ObservableObject {
     }
 
     public func removeInputTapSafely() {
-        guard isTapInstalled else { return }
+        guard isTapInstalled, let engine = self.engine else { return }
         engine.inputNode.removeTap(onBus: 0)
         isTapInstalled = false
     }
@@ -385,15 +407,14 @@ public final class SharedAudioEngine: ObservableObject {
 
     @objc private func handleAudioRouteChange(_ notification: Notification) {
         updateActiveRoute()
-        guard engine.isRunning else { return }
+        guard engine?.isRunning == true else { return }
         engineQueue.async { [weak self] in
-            guard let self = self, self.engine.isRunning else { return }
+            guard let self = self, self.engine?.isRunning == true else { return }
             self.removeInputTapSafely()
 
             do {
                 try self.configureAudioSession(forceEarbudMic: self.isUsingEarbudMic)
-                if self.engine.isRunning {
-                    self.ensureNodesConnected()
+                if self.engine?.isRunning == true {
                     self.installInputTapSafely()
                 }
             } catch {
@@ -403,7 +424,7 @@ public final class SharedAudioEngine: ObservableObject {
     }
 
     @objc private func handleAudioInterruption(_ notification: Notification) {
-        guard engine.isRunning else { return }
+        guard engine?.isRunning == true else { return }
         guard let info = notification.userInfo,
               let typeValue = info[AVAudioSessionInterruptionTypeKey] as? UInt,
               let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
@@ -411,7 +432,7 @@ public final class SharedAudioEngine: ObservableObject {
         if type == .ended {
             engineQueue.async { [weak self] in
                 guard let self = self, self.isRunning else { return }
-                try? self.startEngine()
+                try? self.startEngine(forceEarbudMic: self.isUsingEarbudMic)
             }
         }
     }

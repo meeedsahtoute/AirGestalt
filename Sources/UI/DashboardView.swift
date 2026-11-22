@@ -32,12 +32,42 @@ public struct DashboardView: View {
         AirPodsModel.from(rawModelCode: UInt16(spoofedModelRaw))
     }
 
+    private var leftBatteryState: EarbudBatteryState {
+        if let pct = continuityDecoder.latestFrame?.leftBattery.percentage {
+            return EarbudBatteryState(percentage: pct, isCharging: continuityDecoder.latestFrame?.leftBattery.isCharging ?? false)
+        }
+        if let gattPct = gattClient.gattLeftBattery {
+            return EarbudBatteryState(percentage: gattPct, isCharging: false)
+        }
+        return EarbudBatteryState(percentage: nil, isCharging: false)
+    }
+
+    private var rightBatteryState: EarbudBatteryState {
+        if let pct = continuityDecoder.latestFrame?.rightBattery.percentage {
+            return EarbudBatteryState(percentage: pct, isCharging: continuityDecoder.latestFrame?.rightBattery.isCharging ?? false)
+        }
+        if let gattPct = gattClient.gattRightBattery {
+            return EarbudBatteryState(percentage: gattPct, isCharging: false)
+        }
+        return EarbudBatteryState(percentage: nil, isCharging: false)
+    }
+
+    private var caseBatteryState: EarbudBatteryState {
+        if let pct = continuityDecoder.latestFrame?.caseBattery.percentage {
+            return EarbudBatteryState(percentage: pct, isCharging: continuityDecoder.latestFrame?.caseBattery.isCharging ?? false)
+        }
+        if let gattPct = gattClient.gattCaseBattery {
+            return EarbudBatteryState(percentage: gattPct, isCharging: false)
+        }
+        return EarbudBatteryState(percentage: nil, isCharging: false)
+    }
+
     private var currentFrame: DeviceContinuityFrame {
         continuityDecoder.latestFrame ?? DeviceContinuityFrame(
             model: spoofedModel,
-            leftBattery: EarbudBatteryState(percentage: nil, isCharging: false),
-            rightBattery: EarbudBatteryState(percentage: nil, isCharging: false),
-            caseBattery: EarbudBatteryState(percentage: nil, isCharging: false),
+            leftBattery: leftBatteryState,
+            rightBattery: rightBatteryState,
+            caseBattery: caseBatteryState,
             leftInEar: false,
             rightInEar: false,
             primaryMicIsLeft: false,
@@ -54,7 +84,7 @@ public struct DashboardView: View {
                 // 3D Procedural Earbud Model Card
                 VStack(spacing: 10) {
                     ZStack(alignment: .topTrailing) {
-                        AirPods3DView(isCaseMode: isCase3DMode, isCharging: currentFrame.caseBattery.isCharging)
+                        AirPods3DView(isCaseMode: isCase3DMode, isCharging: caseBatteryState.isCharging)
                             .frame(height: 195)
 
                         // 3D Switch Mode (Earbuds vs Case)
@@ -78,17 +108,17 @@ public struct DashboardView: View {
                         BatteryStatusCard(
                             title: "Left",
                             icon: "airpodspro.left",
-                            battery: currentFrame.leftBattery
+                            battery: leftBatteryState
                         )
                         BatteryStatusCard(
                             title: "Case",
                             icon: "airpodspro.chargingcase.wireless",
-                            battery: currentFrame.caseBattery
+                            battery: caseBatteryState
                         )
                         BatteryStatusCard(
                             title: "Right",
                             icon: "airpodspro.right",
-                            battery: currentFrame.rightBattery
+                            battery: rightBatteryState
                         )
                     }
                     .padding(.horizontal, 16)
@@ -284,9 +314,10 @@ public struct DashboardView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                         }
 
-                        // Safety Lock Status
+                        // Safety Lock Interactive Toggle
                         Button(action: {
-                            HapticFeedbackManager.shared.warning()
+                            HapticFeedbackManager.shared.buttonTap()
+                            gattClient.isBrickingSafetyLockEngaged.toggle()
                         }) {
                             HStack {
                                 Image(systemName: gattClient.isBrickingSafetyLockEngaged ? "lock.shield.fill" : "exclamationmark.shield.fill")
@@ -295,11 +326,14 @@ public struct DashboardView: View {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("Safety Lock")
                                         .font(.system(size: 13, weight: .bold))
-                                    Text("Anti-Bricking Active")
+                                    Text(gattClient.isBrickingSafetyLockEngaged ? "Anti-Bricking Active" : "Bypassed (Warning)")
                                         .font(.system(size: 10))
-                                        .foregroundColor(.secondary)
+                                        .foregroundColor(gattClient.isBrickingSafetyLockEngaged ? .secondary : .red)
                                 }
                                 Spacer()
+                                Image(systemName: gattClient.isBrickingSafetyLockEngaged ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                    .font(.system(size: 16))
+                                    .foregroundColor(gattClient.isBrickingSafetyLockEngaged ? .green : .red)
                             }
                             .foregroundColor(.primary)
                             .padding(12)
@@ -389,11 +423,10 @@ public struct DashboardView: View {
         dspProcessor.setNoiseMode(mode)
         gattClient.sendNoiseMode(mode)
 
-        if mode == .transparency {
-            audioEngine.setTransparencyActive(true)
-        } else {
+        // Hardware BLE controls must NEVER touch AVAudioSession!
+        // We only deactivate software transparency if it was previously active.
+        if audioEngine.isSoftwareTransparencyActive {
             audioEngine.setTransparencyActive(false)
-            // Clean deactivation: when switching to Off or Max ANC (hardware BLE), stop the engine and deactivate AVAudioSession
             if !audioEngine.isAmbientMonitoringActive {
                 audioEngine.stopEngine()
             }

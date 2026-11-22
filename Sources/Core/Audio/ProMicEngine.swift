@@ -3,9 +3,10 @@
 //  AirGestalt
 //
 //  Studio-Grade Voice Isolation & Vocal DSP Engine.
+//  100% Strictly Lazy: Zero audio hardware or node initialization on launch.
 //  Features:
 //  1. Anti-HFP Studio Routing with live A/B switch (iPhone Studio Mic vs Native Earbud Mic)
-//  2. Apple Hardware Voice Processing & AGC (inputNode)
+//  2. Apple Hardware Voice Processing & AGC on-demand
 //  3. Broadcast Vocal DSP Chain: 85Hz High-Pass, vDSP Adaptive Noise Gate, Warmth EQ & SIMD Dynamics Compressor
 //  4. Real-time VU/dB Meter and 10-Second Voice Note Recorder with DSP ON/OFF comparison.
 //
@@ -23,7 +24,7 @@ public final class ProMicEngine: NSObject, ObservableObject, AVAudioPlayerDelega
     @Published public var isUsingEarbudMic: Bool = false
     @Published public var vuMeterLevel: Float = 0.0 // 0.0 to 1.0 for UI meter
     @Published public var peakLevelDb: Float = -60.0
-    @Published public var isVoiceProcessingActive: Bool = true
+    @Published public var isVoiceProcessingActive: Bool = false
 
     // Recorder State
     @Published public var isRecording: Bool = false
@@ -33,8 +34,8 @@ public final class ProMicEngine: NSObject, ObservableObject, AVAudioPlayerDelega
     @Published public var isDspEnabledForPlayback: Bool = true
     @Published public var comparisonPlaybackProgress: Double = 0.0
 
-    // MARK: - Audio Processing Nodes & Filters
-    public let vocalEQ = AVAudioUnitEQ(numberOfBands: 3)
+    // MARK: - Lazy Audio Processing Nodes & Filters
+    public var vocalEQ: AVAudioUnitEQ?
 
     // Broadcast Dynamics Compressor State (SIMD vDSP)
     public var isCompressorBypassed: Bool = true
@@ -62,20 +63,23 @@ public final class ProMicEngine: NSObject, ObservableObject, AVAudioPlayerDelega
 
     private override init() {
         super.init()
-        setupVocalDSPChain()
+        // Zero audio hardware or session interaction on launch.
     }
 
-    // MARK: - Broadcast Vocal DSP Chain Setup
+    // MARK: - On-Demand Broadcast Vocal DSP Chain Setup
 
-    private func setupVocalDSPChain() {
+    public func setupVocalDSPChain() {
+        let eq = AVAudioUnitEQ(numberOfBands: 3)
+        self.vocalEQ = eq
+
         // Band 0: Sub-Bass Rumble Cut (High-Pass at 85Hz, 12dB/octave)
-        let hpBand = vocalEQ.bands[0]
+        let hpBand = eq.bands[0]
         hpBand.filterType = .highPass
         hpBand.frequency = 85.0
         hpBand.bypass = false
 
         // Band 1: Vocal Presence & Warmth (+2.5dB at 3.2kHz, Q = 1.2)
-        let presenceBand = vocalEQ.bands[1]
+        let presenceBand = eq.bands[1]
         presenceBand.filterType = .parametric
         presenceBand.frequency = 3200.0
         presenceBand.bandwidth = 1.2
@@ -83,7 +87,7 @@ public final class ProMicEngine: NSObject, ObservableObject, AVAudioPlayerDelega
         presenceBand.bypass = false
 
         // Band 2: Gentle De-Essing Notch (-2.2dB at 7.2kHz, Q = 2.0)
-        let deEssBand = vocalEQ.bands[2]
+        let deEssBand = eq.bands[2]
         deEssBand.filterType = .parametric
         deEssBand.frequency = 7200.0
         deEssBand.bandwidth = 2.0
@@ -96,7 +100,7 @@ public final class ProMicEngine: NSObject, ObservableObject, AVAudioPlayerDelega
         compressorMakeupGainDb = 3.2
     }
 
-    // MARK: - Hardware Voice Processing Configuration
+    // MARK: - Hardware Voice Processing Configuration (On-Demand)
 
     public func configureVoiceProcessing(on inputNode: AVAudioInputNode) {
         do {
@@ -107,33 +111,36 @@ public final class ProMicEngine: NSObject, ObservableObject, AVAudioPlayerDelega
                 self.isVoiceProcessingActive = true
             }
         } catch {
-            print("Failed to enable hardware voice processing: \(error)")
+            print("Voice processing setup note: \(error.localizedDescription)")
         }
     }
 
     public func setMicMode(_ mode: VoiceMicMode) {
         self.activeMicMode = mode
 
-        guard SharedAudioEngine.shared.isRunning else { return }
-        let inputNode = SharedAudioEngine.shared.engine.inputNode
+        guard SharedAudioEngine.shared.isRunning, let engine = SharedAudioEngine.shared.engine else { return }
+        let inputNode = engine.inputNode
         switch mode {
         case .standard:
             inputNode.isVoiceProcessingBypassed = true
-            vocalEQ.bypass = true
+            vocalEQ?.bypass = true
             isCompressorBypassed = true
         case .voiceIsolation:
             inputNode.isVoiceProcessingBypassed = false
             inputNode.isVoiceProcessingAGCEnabled = true
-            vocalEQ.bypass = true
+            vocalEQ?.bypass = true
             isCompressorBypassed = true
         case .wideSpectrum:
             inputNode.isVoiceProcessingBypassed = true
-            vocalEQ.bypass = true
+            vocalEQ?.bypass = true
             isCompressorBypassed = true
         case .studioBroadcast:
             inputNode.isVoiceProcessingBypassed = false
             inputNode.isVoiceProcessingAGCEnabled = true
-            vocalEQ.bypass = false
+            if vocalEQ == nil {
+                setupVocalDSPChain()
+            }
+            vocalEQ?.bypass = false
             isCompressorBypassed = false
         }
     }
@@ -191,6 +198,7 @@ public final class ProMicEngine: NSObject, ObservableObject, AVAudioPlayerDelega
             vDSP_vsmul(samples, 1, &linearGain, samples, 1, vDSP_Length(frameCount))
         }
 
+        // Throttle MainActor UI dispatches (~15Hz)
         let now = Date().timeIntervalSince1970
         if now - lastVuUpdateTime >= 0.066 {
             lastVuUpdateTime = now
@@ -205,6 +213,15 @@ public final class ProMicEngine: NSObject, ObservableObject, AVAudioPlayerDelega
 
     public func start10SecondRecording() {
         guard !isRecording else { return }
+
+        // Start SharedAudioEngine lazily with non-interrupting options if needed
+        if !SharedAudioEngine.shared.isRunning {
+            do {
+                try SharedAudioEngine.shared.startEngine(forceEarbudMic: isUsingEarbudMic)
+            } catch {
+                print("Failed to start audio engine for recording: \(error)")
+            }
+        }
 
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let fileURL = documentsPath.appendingPathComponent("AirGestalt_VoiceNote.m4a")

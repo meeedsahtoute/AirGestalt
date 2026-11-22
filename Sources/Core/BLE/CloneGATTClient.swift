@@ -5,7 +5,8 @@
 //  Dedicated Hardware Clone ANC Unlocker & BLE GATT Client.
 //  Connects to Airoha RACE, Nordic UART / Bluetrum, BES DataPath, and JieLi (JL),
 //  with 6-byte RACE framing, read-only diagnostic probing, interactive auto-detection,
-//  smart TV/clutter filtering, RSSI-descending sorting, and a HARD safety lock.
+//  smart TV/clutter filtering, RSSI-descending sorting, persistent auto-reconnect,
+//  real battery polling, and a persistent anti-bricking safety lock.
 //
 
 import Foundation
@@ -65,7 +66,7 @@ public final class CloneGATTClient: NSObject, ObservableObject {
     @Published public var isProbing: Bool = false
     @Published public var isDetectingChipset: Bool = false
     @Published public var detectionStatusMessage: String = "Tap to Auto-Detect Chipset"
-    @Published public var lastGATTStatus: String = "Idle"
+    @Published public var lastGATTStatus: String = "Ready"
     @Published public var showDetectionSheet: Bool = false
     @Published public var showAllDevices: Bool = UserDefaults.standard.bool(forKey: "com.airgestalt.showAllDevices") {
         didSet {
@@ -79,17 +80,27 @@ public final class CloneGATTClient: NSObject, ObservableObject {
     @Published public var detectedChipsetName: String? = nil
     @Published public var socModelInfo: String? = nil
     @Published public var classicBDAddress: String? = nil
-    @Published public var isBrickingSafetyLockEngaged: Bool = true
+    @Published public var isBrickingSafetyLockEngaged: Bool = (UserDefaults.standard.object(forKey: "com.airgestalt.safetyLockEnabled") as? Bool) ?? true {
+        didSet {
+            UserDefaults.standard.set(isBrickingSafetyLockEngaged, forKey: "com.airgestalt.safetyLockEnabled")
+        }
+    }
     @Published public var lastSentHex: String? = nil
     @Published public var lastReceivedHex: String? = nil
     @Published public var currentNoiseMode: NoiseControlMode = .off
 
+    // Polled Real GATT Battery Levels
+    @Published public var gattLeftBattery: Int? = nil
+    @Published public var gattRightBattery: Int? = nil
+    @Published public var gattCaseBattery: Int? = nil
+
     // MARK: - CoreBluetooth State
-    private var centralManager: CBCentralManager!
+    private var centralManager: CBCentralManager?
     private var targetPeripheral: CBPeripheral?
     private var activeWriteCharacteristic: CBCharacteristic?
     private var activeNotifyCharacteristic: CBCharacteristic?
     private var scanTimeoutTimer: Timer?
+    private var batteryPollingTimer: Timer?
 
     // Forwarding closure for Packet Diffing Lab
     public var onPacketCaptured: ((GATTPacketRecord) -> Void)?
@@ -113,13 +124,19 @@ public final class CloneGATTClient: NSObject, ObservableObject {
         let name = peripheral.name ?? "Earbud"
         self.detectionStatusMessage = "Connecting to \(name)..."
         self.lastGATTStatus = "Connecting to \(name)..."
-        centralManager.connect(peripheral, options: [CBConnectPeripheralOptionNotifyOnDisconnectionKey: true])
+
+        // Persist last connected peripheral UUID for auto-reconnection
+        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: "com.airgestalt.lastConnectedPeripheralUUID")
+
+        centralManager?.connect(peripheral, options: [CBConnectPeripheralOptionNotifyOnDisconnectionKey: true])
     }
 
     public func disconnect() {
         if let p = targetPeripheral {
-            centralManager.cancelPeripheralConnection(p)
+            centralManager?.cancelPeripheralConnection(p)
         }
+        batteryPollingTimer?.invalidate()
+        batteryPollingTimer = nil
         isConnected = false
         isConnecting = false
         isProbing = false
@@ -129,6 +146,18 @@ public final class CloneGATTClient: NSObject, ObservableObject {
         activeNotifyCharacteristic = nil
         detectionStatusMessage = "Disconnected"
         lastGATTStatus = "Disconnected"
+    }
+
+    private func autoReconnectLastPeripheral() {
+        guard let savedUUIDString = UserDefaults.standard.string(forKey: "com.airgestalt.lastConnectedPeripheralUUID"),
+              let savedUUID = UUID(uuidString: savedUUIDString),
+              let central = centralManager, central.state == .poweredOn else { return }
+
+        let peripherals = central.retrievePeripherals(withIdentifiers: [savedUUID])
+        if let lastPeripheral = peripherals.first, targetPeripheral == nil {
+            print("Auto-reconnecting to paired earbud: \(lastPeripheral.name ?? savedUUIDString)")
+            connect(to: lastPeripheral)
+        }
     }
 
     // MARK: - Interactive Auto-Detect ANC Probing & Scanning
@@ -143,7 +172,7 @@ public final class CloneGATTClient: NSObject, ObservableObject {
             return
         }
 
-        guard centralManager.state == .poweredOn else {
+        guard let central = centralManager, central.state == .poweredOn else {
             detectionStatusMessage = "Bluetooth is currently unavailable."
             lastGATTStatus = "Bluetooth unavailable."
             return
@@ -154,7 +183,7 @@ public final class CloneGATTClient: NSObject, ObservableObject {
         lastGATTStatus = "Scanning for clone peripherals..."
 
         // Scan for all peripherals
-        centralManager.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
+        central.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
 
         scanTimeoutTimer?.invalidate()
         scanTimeoutTimer = Timer.scheduledTimer(withTimeInterval: 6.0, repeats: false) { [weak self] _ in
@@ -173,7 +202,7 @@ public final class CloneGATTClient: NSObject, ObservableObject {
     public func stopScan() {
         scanTimeoutTimer?.invalidate()
         scanTimeoutTimer = nil
-        centralManager.stopScan()
+        centralManager?.stopScan()
         isDetectingChipset = false
     }
 
@@ -195,7 +224,10 @@ public final class CloneGATTClient: NSObject, ObservableObject {
             print("AutoDetect: Airoha probe error: \(error)")
         }
 
-        // 2. Discover matching services against ChipsetDatabase
+        // 2. Query Battery via RACE opcode 0x0A02
+        queryBatteryViaRACE()
+
+        // 3. Discover matching services against ChipsetDatabase
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
             guard let self = self else { return }
             self.matchDiscoveredServicesWithProfile()
@@ -238,7 +270,7 @@ public final class CloneGATTClient: NSObject, ObservableObject {
     // MARK: - Safe RACE Packet Framing (6-Byte Header)
 
     public func buildRACEFrame(opcode: UInt16, payload: Data) throws -> Data {
-        // HARD SAFETY LOCK: Check if opcode is dangerous
+        // HARD SAFETY LOCK: Block dangerous opcodes to protect flash/NVRAM from bricking
         if isBrickingSafetyLockEngaged && ChipsetDatabase.AirohaRACE.dangerousOpcodes.contains(opcode) {
             throw ChipsetSafetyError.destructiveOpcodeBlocked(opcode: opcode)
         }
@@ -259,13 +291,10 @@ public final class CloneGATTClient: NSObject, ObservableObject {
         return packet
     }
 
-    // MARK: - ANC Command Dispatcher
+    // MARK: - Real Hardware BLE ANC Command Dispatcher
 
     public func sendNoiseMode(_ mode: NoiseControlMode) {
-        guard let profile = activeProfile else {
-            self.lastGATTStatus = "No active chipset profile."
-            return
-        }
+        let profile = activeProfile ?? ChipsetDatabase.defaultProfile()
 
         let hexCommand: String
         switch mode {
@@ -286,7 +315,7 @@ public final class CloneGATTClient: NSObject, ObservableObject {
 
         guard isConnected, activeWriteCharacteristic != nil else {
             self.currentNoiseMode = mode
-            self.lastGATTStatus = "Hardware BLE Offline: Switched Software \(mode.title)"
+            self.lastGATTStatus = "BLE Offline: \(mode.title) (Connect earbud in GATT Lab)"
             return
         }
 
@@ -316,6 +345,16 @@ public final class CloneGATTClient: NSObject, ObservableObject {
         DispatchQueue.main.async {
             self.lastSentHex = targetHex
             self.lastGATTStatus = "TX Sent (EQ): \(targetHex)"
+        }
+    }
+
+    public func queryBatteryViaRACE() {
+        guard isConnected else { return }
+        do {
+            let battQuery = try buildRACEFrame(opcode: ChipsetDatabase.AirohaRACE.opcodeQueryBattery, payload: Data())
+            sendRawBytes(battQuery, direction: .tx)
+        } catch {
+            print("Battery query error: \(error)")
         }
     }
 
@@ -372,7 +411,7 @@ public final class CloneGATTClient: NSObject, ObservableObject {
 extension CloneGATTClient: CBCentralManagerDelegate {
     public func centralManagerDidUpdateState(_ central: CBCentralManager) {
         if central.state == .poweredOn {
-            // Ready
+            autoReconnectLastPeripheral()
         } else {
             isDetectingChipset = false
             isConnected = false
@@ -421,6 +460,13 @@ extension CloneGATTClient: CBCentralManagerDelegate {
             // Sort dynamically by strongest signal (RSSI descending)
             self.discoveredCloneDevices.sort { $0.rssi > $1.rssi }
         }
+
+        // Auto-reconnect if matching last paired device
+        if let savedUUID = UserDefaults.standard.string(forKey: "com.airgestalt.lastConnectedPeripheralUUID"),
+           peripheral.identifier.uuidString == savedUUID,
+           targetPeripheral == nil {
+            connect(to: peripheral)
+        }
     }
 
     public func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
@@ -434,6 +480,12 @@ extension CloneGATTClient: CBCentralManagerDelegate {
 
         // Discover all services
         peripheral.discoverServices(nil)
+
+        // Setup periodic battery polling timer every 30 seconds
+        batteryPollingTimer?.invalidate()
+        batteryPollingTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+            self?.queryBatteryViaRACE()
+        }
     }
 
     public func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
@@ -452,6 +504,8 @@ extension CloneGATTClient: CBCentralManagerDelegate {
         targetPeripheral = nil
         activeWriteCharacteristic = nil
         activeNotifyCharacteristic = nil
+        batteryPollingTimer?.invalidate()
+        batteryPollingTimer = nil
         detectionStatusMessage = "Disconnected from earbud"
         lastGATTStatus = "Disconnected"
     }
@@ -472,6 +526,7 @@ extension CloneGATTClient: CBPeripheralDelegate {
         guard let characteristics = service.characteristics else { return }
 
         for char in characteristics {
+            // Writable characteristic discovery
             if char.properties.contains(.write) || char.properties.contains(.writeWithoutResponse) {
                 if activeWriteCharacteristic == nil ||
                    char.uuid == ChipsetDatabase.KnownUUIDs.airohaWriteChar ||
@@ -482,17 +537,24 @@ extension CloneGATTClient: CBPeripheralDelegate {
                 }
             }
 
+            // Notification characteristic discovery
             if char.properties.contains(.notify) || char.properties.contains(.indicate) {
                 peripheral.setNotifyValue(true, for: char)
                 if activeNotifyCharacteristic == nil {
                     activeNotifyCharacteristic = char
                 }
             }
+
+            // Standard Battery Level Characteristic (0x2A19)
+            if char.uuid == ContinuityDecoder.batteryLevelCharUUID {
+                peripheral.readValue(for: char)
+                peripheral.setNotifyValue(true, for: char)
+            }
         }
 
         matchDiscoveredServicesWithProfile()
 
-        // If newly connected and writable char found, auto-probe diagnostic info
+        // If newly connected and writable char found, auto-probe diagnostic info and battery
         if activeWriteCharacteristic != nil && !isProbing {
             autoDetectHardwareANC()
         }
@@ -500,6 +562,15 @@ extension CloneGATTClient: CBPeripheralDelegate {
 
     public func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         guard let data = characteristic.value, !data.isEmpty else { return }
+
+        // Standard BLE Battery Level read (0x2A19)
+        if characteristic.uuid == ContinuityDecoder.batteryLevelCharUUID {
+            let batteryVal = Int(data[0])
+            DispatchQueue.main.async {
+                self.gattLeftBattery = batteryVal
+                self.gattRightBattery = batteryVal
+            }
+        }
 
         let hex = data.map { String(format: "%02X", $0) }.joined()
         DispatchQueue.main.async {
@@ -517,7 +588,7 @@ extension CloneGATTClient: CBPeripheralDelegate {
         )
         onPacketCaptured?(record)
 
-        // Parse RACE Diagnostic responses
+        // Parse RACE Diagnostic responses (Sync: 0x05, 0x5A)
         if data.count >= 6 && data[0] == 0x05 && data[1] == 0x5A {
             let opcode = UInt16(data[4]) | (UInt16(data[5]) << 8)
 
@@ -533,6 +604,21 @@ extension CloneGATTClient: CBPeripheralDelegate {
                 let mac = addrBytes.reversed().map { String(format: "%02X", $0) }.joined(separator: ":")
                 DispatchQueue.main.async {
                     self.classicBDAddress = mac
+                }
+            } else if opcode == ChipsetDatabase.AirohaRACE.opcodeQueryBattery {
+                // RACE Battery Payload layout: [LeftByte, RightByte, CaseByte]
+                let payload = [UInt8](data.dropFirst(6))
+                if payload.count >= 2 {
+                    let left = Int(payload[0])
+                    let right = Int(payload[1])
+                    let caseVal = payload.count >= 3 ? Int(payload[2]) : nil
+                    DispatchQueue.main.async {
+                        self.gattLeftBattery = (left <= 100) ? left : nil
+                        self.gattRightBattery = (right <= 100) ? right : nil
+                        if let c = caseVal, c <= 100 {
+                            self.gattCaseBattery = c
+                        }
+                    }
                 }
             }
         }

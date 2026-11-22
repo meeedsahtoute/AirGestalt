@@ -4,7 +4,7 @@
 //
 //  10-Band Parametric Equalizer, Real Acoustic Ear Tip Fit Sweep Test (Zero-Mock),
 //  Stereo Find My Chirp Generator, and Head-Tracked Simulated Spatial Audio
-//  via CoreMotion & AVAudioEnvironmentNode.
+//  via CoreMotion (CMHeadphoneMotionManager & CMMotionManager).
 //
 
 import Foundation
@@ -18,7 +18,7 @@ public final class SpatialDSPEngine: ObservableObject {
 
     // MARK: - Published State
     @Published public var activePreset: EQPreset = .appleSignature
-    @Published public var currentGains: [Float] = EQPreset.appleSignature.bandGains
+    @Published public var currentGains: [Float]
     @Published public var isSpatialAudioEnabled: Bool = false
     @Published public var headYaw: Double = 0.0
     @Published public var headPitch: Double = 0.0
@@ -35,12 +35,9 @@ public final class SpatialDSPEngine: ObservableObject {
     @Published public var isPlayingFindMyChirp: Bool = false
     @Published public var chirpingChannel: String = "Both"
 
-    // MARK: - Audio Nodes & Motion
-    public var eqNode: AVAudioUnitEQ {
-        SharedAudioEngine.shared.eqNode
-    }
-    public let environmentNode = AVAudioEnvironmentNode()
+    // Motion Tracking
     private let motionManager = CMMotionManager()
+    private let headphoneMotionManager = CMHeadphoneMotionManager()
     private var chirpTimer: Timer?
     private var fitTestRecordedSamples: [Float] = []
     private let fitTestQueue = DispatchQueue(label: "com.airgestalt.fittest.queue")
@@ -52,39 +49,41 @@ public final class SpatialDSPEngine: ObservableObject {
     ]
 
     private init() {
-        setup10BandEQ()
-    }
-
-    // MARK: - 10-Band Parametric EQ Setup
-
-    private func setup10BandEQ() {
-        let node = SharedAudioEngine.shared.eqNode
-        for (index, freq) in SpatialDSPEngine.isoFrequencies.enumerated() {
-            guard index < node.bands.count else { break }
-            let band = node.bands[index]
-            band.frequency = freq
-            band.bandwidth = 1.0 // 1 octave
-            band.filterType = .parametric
-            band.bypass = false
-            band.gain = EQPreset.appleSignature.bandGains[index]
+        if let saved = UserDefaults.standard.array(forKey: "com.airgestalt.eqGains") as? [Float], saved.count == 10 {
+            self.currentGains = saved
+        } else {
+            self.currentGains = EQPreset.appleSignature.bandGains
         }
     }
+
+    // MARK: - 10-Band Parametric EQ Controls
 
     public func applyPreset(_ preset: EQPreset) {
         activePreset = preset
         currentGains = preset.bandGains
-        let node = SharedAudioEngine.shared.eqNode
-        for (index, gain) in preset.bandGains.enumerated() {
-            guard index < node.bands.count else { break }
-            node.bands[index].gain = gain
+        UserDefaults.standard.set(currentGains, forKey: "com.airgestalt.eqGains")
+
+        // Update live EQ node if engine is currently running
+        if let eq = SharedAudioEngine.shared.eqNode {
+            for (index, gain) in preset.bandGains.enumerated() {
+                guard index < eq.bands.count else { break }
+                eq.bands[index].gain = gain
+            }
         }
+
+        // Send Hardware EQ GATT command over BLE to clone earbuds without touching audio session
+        CloneGATTClient.shared.sendHardwareEQPreset(preset)
     }
 
     public func updateBandGain(index: Int, gain: Float) {
-        let node = SharedAudioEngine.shared.eqNode
-        guard index >= 0 && index < node.bands.count else { return }
-        node.bands[index].gain = gain
+        guard index >= 0 && index < currentGains.count else { return }
         currentGains[index] = gain
+        UserDefaults.standard.set(currentGains, forKey: "com.airgestalt.eqGains")
+
+        // Update live EQ node if engine is currently running
+        if let eq = SharedAudioEngine.shared.eqNode, index < eq.bands.count {
+            eq.bands[index].gain = gain
+        }
     }
 
     // MARK: - Real Acoustic Ear Tip Fit Test (Zero-Mock)
@@ -273,7 +272,7 @@ public final class SpatialDSPEngine: ObservableObject {
         SharedAudioEngine.shared.scheduleBufferSafely(pcm)
     }
 
-    // MARK: - CoreMotion Head Tracking & 3D Spatial Audio
+    // MARK: - CoreMotion Head Tracking & Simulated Spatial Audio
 
     public func toggleSpatialAudio(_ enabled: Bool) {
         isSpatialAudioEnabled = enabled
@@ -282,35 +281,41 @@ public final class SpatialDSPEngine: ObservableObject {
             startHeadTracking()
         } else {
             stopHeadTracking()
-            environmentNode.listenerAngularOrientation = AVAudio3DAngularOrientation(yaw: 0, pitch: 0, roll: 0)
+            headYaw = 0.0
+            headPitch = 0.0
+            headRoll = 0.0
         }
     }
 
     private func startHeadTracking() {
-        guard motionManager.isDeviceMotionAvailable else { return }
+        // First try headphone motion manager (for supported AirPods)
+        if headphoneMotionManager.isDeviceMotionAvailable {
+            headphoneMotionManager.startDeviceMotionUpdates(to: .main) { [weak self] motion, _ in
+                guard let self = self, let attitude = motion?.attitude else { return }
+                self.headYaw = attitude.yaw * 180.0 / .pi
+                self.headPitch = attitude.pitch * 180.0 / .pi
+                self.headRoll = attitude.roll * 180.0 / .pi
+            }
+            return
+        }
 
+        // Fallback to iPhone device attitude motion manager
+        guard motionManager.isDeviceMotionAvailable else { return }
         motionManager.deviceMotionUpdateInterval = 0.02 // 50 Hz
         motionManager.startDeviceMotionUpdates(to: .main) { [weak self] motion, _ in
             guard let self = self, let attitude = motion?.attitude else { return }
-
-            let yawDeg = attitude.yaw * 180.0 / .pi
-            let pitchDeg = attitude.pitch * 180.0 / .pi
-            let rollDeg = attitude.roll * 180.0 / .pi
-
-            self.headYaw = yawDeg
-            self.headPitch = pitchDeg
-            self.headRoll = rollDeg
-
-            // Apply orientation to 3D environment listener
-            self.environmentNode.listenerAngularOrientation = AVAudio3DAngularOrientation(
-                yaw: Float(yawDeg),
-                pitch: Float(pitchDeg),
-                roll: Float(rollDeg)
-            )
+            self.headYaw = attitude.yaw * 180.0 / .pi
+            self.headPitch = attitude.pitch * 180.0 / .pi
+            self.headRoll = attitude.roll * 180.0 / .pi
         }
     }
 
     private func stopHeadTracking() {
-        motionManager.stopDeviceMotionUpdates()
+        if headphoneMotionManager.isDeviceMotionActive {
+            headphoneMotionManager.stopDeviceMotionUpdates()
+        }
+        if motionManager.isDeviceMotionActive {
+            motionManager.stopDeviceMotionUpdates()
+        }
     }
 }
