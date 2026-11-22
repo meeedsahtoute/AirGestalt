@@ -113,6 +113,85 @@ public struct EQAndToolsView: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
 
+                // System-Wide iOS Audio Tuning Card (Headphone Accommodations)
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        ZStack {
+                            Circle()
+                                .fill(Color.purple.opacity(0.18))
+                                .frame(width: 34, height: 34)
+                            Image(systemName: "headphones.circle.fill")
+                                .font(.system(size: 20))
+                                .foregroundColor(.purple)
+                        }
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("AirPods Pro Acoustic Tuning")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(.primary)
+
+                            Text("System-Wide Enhancement for Spotify, YouTube & Apple Music")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+
+                        Spacer()
+
+                        Button(action: {
+                            HapticFeedbackManager.shared.buttonTap()
+                            if let url = URL(string: "App-Prefs:root=ACCESSIBILITY&path=AUDIO_VISUAL_TITLE") ?? URL(string: UIApplication.openSettingsURLString) {
+                                UIApplication.shared.open(url)
+                            }
+                        }) {
+                            HStack(spacing: 4) {
+                                Text("Open Settings")
+                                Image(systemName: "arrow.up.forward.app")
+                            }
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(Color.purple)
+                            .clipShape(Capsule())
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                                .font(.system(size: 11))
+                            Text("1. Turn ON 'Headphone Accommodations'")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        HStack(spacing: 5) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                                .font(.system(size: 11))
+                            Text("2. Set Tune to 'Balanced Tone' or 'Vocal Range'")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        HStack(spacing: 5) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                                .font(.system(size: 11))
+                            Text("3. Choose 'Moderate' or 'Strong' boost for open-ear replica bass")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                    }
+                    .foregroundColor(.secondary)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color(uiColor: .tertiarySystemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .padding(16)
+                .background(
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .fill(Color(uiColor: .secondarySystemBackground))
+                )
+                .padding(.horizontal, 16)
+
                 // Ear Tip Fit Test Card (Zero-Mock Acoustic Analysis)
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
