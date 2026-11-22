@@ -424,25 +424,67 @@ public struct DashboardView: View {
 
     private var pinnedHeaderView: some View {
         HStack(alignment: .center) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(audioEngine.activeOutputDeviceName)
-                        .font(.system(size: 20, weight: .bold, design: .rounded))
-                        .foregroundColor(.primary)
-                        .lineLimit(1)
+            HStack(spacing: 10) {
+                // Subtle Brand Vector Emblem (Matching Acoustic Wave + AirPods icon)
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [Color(red: 10/255, green: 13/255, blue: 20/255), Color(red: 20/255, green: 27/255, blue: 45/255)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 34, height: 34)
+                        .overlay(
+                            Circle()
+                                .stroke(
+                                    LinearGradient(
+                                        colors: [Color.cyan.opacity(0.85), Color.blue.opacity(0.4)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ),
+                                    lineWidth: 1.2
+                                )
+                        )
+                        .shadow(color: Color.cyan.opacity(0.25), radius: 4, x: 0, y: 0)
 
-                    Button(action: {
-                        isShowingDeviceSpoofer = true
-                    }) {
-                        Image(systemName: "pencil.circle.fill")
-                            .font(.system(size: 15))
-                            .foregroundColor(.secondary)
-                    }
+                    Image(systemName: "airpodspro")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(.white)
                 }
 
-                Text("Serial: \(spoofedSerialNumber) • \(currentFrame.model.badgeName)")
-                    .font(.system(size: 11, weight: .medium, design: .monospaced))
-                    .foregroundColor(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(audioEngine.activeOutputDeviceName)
+                            .font(.system(size: 18, weight: .bold, design: .rounded))
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+
+                        Button(action: {
+                            isShowingDeviceSpoofer = true
+                        }) {
+                            Image(systemName: "pencil.circle.fill")
+                                .font(.system(size: 14))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    HStack(spacing: 4) {
+                        Text("AirGestalt")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(.cyan)
+
+                        Text("•")
+                            .font(.system(size: 8))
+                            .foregroundColor(.secondary)
+
+                        Text("Serial: \(spoofedSerialNumber) • \(currentFrame.model.badgeName)")
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
             }
 
             Spacer()
