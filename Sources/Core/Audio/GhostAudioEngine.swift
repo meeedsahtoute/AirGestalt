@@ -232,6 +232,12 @@ public final class GhostAudioEngine: ObservableObject {
         mode: AVAudioSession.Mode,
         forceEarbudMic: Bool
     ) throws {
+        // Step 0: Guard if already running with an active graph
+        if self.isRunning, let eng = self.engine, eng.isRunning {
+            self.micPassthroughMixer?.outputVolume = isSoftwareTransparencyActive ? transparencyGain : 0.0
+            return
+        }
+
         // Step 1: Request/verify microphone permission & activate AVAudioSession FIRST
         let session = AVAudioSession.sharedInstance()
         if session.recordPermission == .undetermined {
@@ -241,7 +247,7 @@ public final class GhostAudioEngine: ObservableObject {
         try configureAudioSession(mode: mode, forceEarbudMic: forceEarbudMic)
 
         // Step 2: Clean graph reset before touching or wiring inputNode
-        // If an engine already exists, stop, remove tap, disconnect inputNode, and reset
+        // If an engine already exists, stop, remove tap, disconnect inputNode, reset, and release
         if let currentEngine = self.engine {
             self.removeInputTapSafely()
             self.testPlayerNode?.stop()
@@ -251,9 +257,11 @@ public final class GhostAudioEngine: ObservableObject {
             }
             currentEngine.disconnectNodeOutput(currentEngine.inputNode)
             currentEngine.reset()
+            self.engine = nil
         }
 
-        let activeEngine = self.engine ?? AVAudioEngine()
+        // Always instantiate a pristine fresh AVAudioEngine instance
+        let activeEngine = AVAudioEngine()
         if activeEngine.isRunning {
             activeEngine.stop()
         }
