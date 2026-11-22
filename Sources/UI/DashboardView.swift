@@ -518,6 +518,25 @@ public struct DashboardView: View {
                     }
                 }
                 .padding(.horizontal, 16)
+
+                // Humorous Apple Budget Easter Egg Footer Card
+                HStack(spacing: 8) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.orange)
+
+                    Text("Sorry Apple, ma3ndich lflous bach nchri AirPods b 2000 DH 😅")
+                        .font(.footnote)
+                        .fontWeight(.medium)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity)
+                .background(Color(.secondarySystemGroupedBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .padding(.horizontal, 16)
                 .padding(.bottom, 24)
             }
         }
