@@ -26,7 +26,7 @@ public final class PacketDiffEngine: ObservableObject {
     public init() {
         // Wire up packet capture callback from CloneGATTClient
         CloneGATTClient.shared.onPacketCaptured = { [weak self] packet in
-            self?.handleIncomingPacket(packet)
+            self?.recordPacket(packet)
         }
     }
 
@@ -55,14 +55,15 @@ public final class PacketDiffEngine: ObservableObject {
         generatedJSONProfile = nil
     }
 
-    private func handleIncomingPacket(_ packet: GATTPacketRecord) {
-        guard isRecording else { return }
-
+    public func recordPacket(_ packet: GATTPacketRecord) {
         DispatchQueue.main.async {
             self.recordedPackets.append(packet)
+            if self.recordedPackets.count > 150 {
+                self.recordedPackets.removeFirst(self.recordedPackets.count - 150)
+            }
 
-            // If we have at least two packets, compute live diff between the latest and previous
-            if self.recordedPackets.count >= 2 {
+            // If recording mode is enabled, compute live diff between the latest and previous matching packet
+            if self.isRecording && self.recordedPackets.count >= 2 {
                 let count = self.recordedPackets.count
                 let p1 = self.recordedPackets[count - 2]
                 let p2 = self.recordedPackets[count - 1]

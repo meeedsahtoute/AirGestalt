@@ -22,6 +22,21 @@ public struct DiscoveredCloneDevice: Identifiable, Equatable {
     public let probableVendor: ChipsetVendor?
 }
 
+public struct DiscoveredGATTService: Identifiable, Equatable {
+    public var id: String { uuid }
+    public let uuid: String
+    public let name: String
+    public var characteristics: [DiscoveredGATTCharacteristic]
+}
+
+public struct DiscoveredGATTCharacteristic: Identifiable, Equatable {
+    public var id: String { uuid }
+    public let uuid: String
+    public let name: String
+    public let properties: [String]
+    public var valueHex: String?
+}
+
 public enum GATTConnectionState: String {
     case disconnected = "Disconnected"
     case connecting = "Connecting..."
@@ -94,6 +109,32 @@ public final class CloneGATTClient: NSObject, ObservableObject {
     @Published public var gattRightBattery: Int? = nil
     @Published public var gattCaseBattery: Int? = nil
 
+    // MARK: - Candidate Services for Connected iOS Accessories
+    public static let candidateServiceUUIDs: [CBUUID] = [
+        CBUUID(string: "180F"), // Battery Service
+        CBUUID(string: "180A"), // Device Information Service
+        CBUUID(string: "1800"), // Generic Access
+        CBUUID(string: "1801"), // Generic Attribute
+        ChipsetDatabase.KnownUUIDs.airohaPrimaryService,
+        ChipsetDatabase.KnownUUIDs.airohaSonyVariantService,
+        ChipsetDatabase.KnownUUIDs.nordicUARTService,
+        ChipsetDatabase.KnownUUIDs.besDataPathService,
+        ChipsetDatabase.KnownUUIDs.huilianService,
+        ChipsetDatabase.KnownUUIDs.qualcommService,
+        ChipsetDatabase.KnownUUIDs.jlService,
+        CBUUID(string: "FFE0"),
+        CBUUID(string: "FFF0"),
+        CBUUID(string: "AE00"),
+        CBUUID(string: "1562")
+    ]
+
+    // Discovered GATT Services & Characteristics Hierarchy
+    @Published public var discoveredServicesList: [DiscoveredGATTService] = []
+
+    public var activeWriteCharacteristicUUID: String? { activeWriteCharacteristic?.uuid.uuidString }
+    public var activeNotifyCharacteristicUUID: String? { activeNotifyCharacteristic?.uuid.uuidString }
+    public var currentTargetPeripheral: CBPeripheral? { targetPeripheral }
+
     // MARK: - CoreBluetooth State
     private var centralManager: CBCentralManager?
     private var targetPeripheral: CBPeripheral?
@@ -144,19 +185,90 @@ public final class CloneGATTClient: NSObject, ObservableObject {
         targetPeripheral = nil
         activeWriteCharacteristic = nil
         activeNotifyCharacteristic = nil
+        discoveredServicesList.removeAll()
         detectionStatusMessage = "Disconnected"
         lastGATTStatus = "Disconnected"
     }
 
-    private func autoReconnectLastPeripheral() {
-        guard let savedUUIDString = UserDefaults.standard.string(forKey: "com.airgestalt.lastConnectedPeripheralUUID"),
-              let savedUUID = UUID(uuidString: savedUUIDString),
-              let central = centralManager, central.state == .poweredOn else { return }
+    public func autoReconnectOrDiscoverConnectedPeripherals() {
+        guard let central = centralManager, central.state == .poweredOn else { return }
 
-        let peripherals = central.retrievePeripherals(withIdentifiers: [savedUUID])
-        if let lastPeripheral = peripherals.first, targetPeripheral == nil {
-            print("Auto-reconnecting to paired earbud: \(lastPeripheral.name ?? savedUUIDString)")
-            connect(to: lastPeripheral)
+        // 1. Try saved UUID
+        if let savedUUIDString = UserDefaults.standard.string(forKey: "com.airgestalt.lastConnectedPeripheralUUID"),
+           let savedUUID = UUID(uuidString: savedUUIDString) {
+            let peripherals = central.retrievePeripherals(withIdentifiers: [savedUUID])
+            if let saved = peripherals.first, targetPeripheral == nil {
+                print("Auto-reconnecting to previously paired earbud: \(saved.name ?? savedUUIDString)")
+                connect(to: saved)
+                return
+            }
+        }
+
+        // 2. Query iOS for already-connected peripherals
+        let connected = central.retrieveConnectedPeripherals(withServices: CloneGATTClient.candidateServiceUUIDs)
+        for p in connected {
+            let name = p.name ?? "Connected Audio Accessory"
+            let dev = DiscoveredCloneDevice(
+                peripheral: p,
+                name: name,
+                rssi: -40,
+                advertisedServices: [],
+                probableVendor: nil
+            )
+            DispatchQueue.main.async {
+                if !self.discoveredCloneDevices.contains(where: { $0.id == dev.id }) {
+                    self.discoveredCloneDevices.insert(dev, at: 0)
+                }
+            }
+        }
+
+        // If not connected and an earbud is already connected in iOS Settings, auto-connect GATT!
+        if targetPeripheral == nil, let best = connected.first {
+            print("Found active iOS connected peripheral: \(best.name ?? "Device"). Auto-connecting GATT...")
+            connect(to: best)
+        }
+    }
+
+    // MARK: - Continuous & Interactive BLE Scanning
+
+    public func startScanning(allowDuplicates: Bool = false) {
+        discoveredCloneDevices.removeAll()
+
+        guard let central = centralManager, central.state == .poweredOn else {
+            detectionStatusMessage = "Bluetooth is currently unavailable."
+            lastGATTStatus = "Bluetooth unavailable."
+            return
+        }
+
+        isDetectingChipset = true
+        detectionStatusMessage = "Scanning for nearby BLE clone earbuds..."
+        lastGATTStatus = "Scanning for clone peripherals..."
+
+        // Immediately check iOS for already-connected peripherals
+        checkAndAddConnectedPeripherals(central: central)
+
+        // Scan for all peripherals
+        central.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: allowDuplicates])
+    }
+
+    public func checkAndAddConnectedPeripherals(central: CBCentralManager) {
+        let connected = central.retrieveConnectedPeripherals(withServices: CloneGATTClient.candidateServiceUUIDs)
+        for peripheral in connected {
+            let name = peripheral.name ?? "Connected Audio Accessory"
+            let dev = DiscoveredCloneDevice(
+                peripheral: peripheral,
+                name: name,
+                rssi: -40,
+                advertisedServices: [],
+                probableVendor: nil
+            )
+            DispatchQueue.main.async {
+                if let index = self.discoveredCloneDevices.firstIndex(where: { $0.id == dev.id }) {
+                    self.discoveredCloneDevices[index] = dev
+                } else {
+                    self.discoveredCloneDevices.insert(dev, at: 0)
+                }
+            }
         }
     }
 
@@ -372,6 +484,7 @@ public final class CloneGATTClient: NSObject, ObservableObject {
 
         let hex = data.map { String(format: "%02X", $0) }.joined()
         self.lastSentHex = hex
+        self.lastGATTStatus = "TX Sent: \(hex)"
 
         let record = GATTPacketRecord(
             timestamp: Date(),
@@ -381,6 +494,7 @@ public final class CloneGATTClient: NSObject, ObservableObject {
             payloadHex: hex,
             rawBytes: [UInt8](data)
         )
+        PacketDiffEngine.shared.recordPacket(record)
         onPacketCaptured?(record)
     }
 
@@ -411,7 +525,7 @@ public final class CloneGATTClient: NSObject, ObservableObject {
 extension CloneGATTClient: CBCentralManagerDelegate {
     public func centralManagerDidUpdateState(_ central: CBCentralManager) {
         if central.state == .poweredOn {
-            autoReconnectLastPeripheral()
+            autoReconnectOrDiscoverConnectedPeripherals()
         } else {
             isDetectingChipset = false
             isConnected = false
@@ -479,6 +593,7 @@ extension CloneGATTClient: CBCentralManagerDelegate {
         lastGATTStatus = "Connected to \(name) ✓"
 
         // Discover all services
+        discoveredServicesList.removeAll()
         peripheral.discoverServices(nil)
 
         // Setup periodic battery polling timer every 30 seconds
@@ -504,6 +619,7 @@ extension CloneGATTClient: CBCentralManagerDelegate {
         targetPeripheral = nil
         activeWriteCharacteristic = nil
         activeNotifyCharacteristic = nil
+        discoveredServicesList.removeAll()
         batteryPollingTimer?.invalidate()
         batteryPollingTimer = nil
         detectionStatusMessage = "Disconnected from earbud"
@@ -525,19 +641,25 @@ extension CloneGATTClient: CBPeripheralDelegate {
     public func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         guard let characteristics = service.characteristics else { return }
 
-        for char in characteristics {
-            // Writable characteristic discovery
-            if char.properties.contains(.write) || char.properties.contains(.writeWithoutResponse) {
-                if activeWriteCharacteristic == nil ||
-                   char.uuid == ChipsetDatabase.KnownUUIDs.airohaWriteChar ||
-                   char.uuid == ChipsetDatabase.KnownUUIDs.nordicUARTWriteChar ||
-                   char.uuid == ChipsetDatabase.KnownUUIDs.besWriteChar ||
-                   char.uuid == ChipsetDatabase.KnownUUIDs.jlWriteChar {
-                    activeWriteCharacteristic = char
-                }
-            }
+        var charInfos: [DiscoveredGATTCharacteristic] = []
 
-            // Notification characteristic discovery
+        for char in characteristics {
+            var props: [String] = []
+            if char.properties.contains(.write) { props.append("Write") }
+            if char.properties.contains(.writeWithoutResponse) { props.append("WriteNoResp") }
+            if char.properties.contains(.notify) { props.append("Notify") }
+            if char.properties.contains(.indicate) { props.append("Indicate") }
+            if char.properties.contains(.read) { props.append("Read") }
+
+            let charInfo = DiscoveredGATTCharacteristic(
+                uuid: char.uuid.uuidString,
+                name: characteristicDisplayName(for: char.uuid),
+                properties: props,
+                valueHex: char.value?.map { String(format: "%02X", $0) }.joined()
+            )
+            charInfos.append(charInfo)
+
+            // Automatically subscribe to ALL notify or indicate characteristics
             if char.properties.contains(.notify) || char.properties.contains(.indicate) {
                 peripheral.setNotifyValue(true, for: char)
                 if activeNotifyCharacteristic == nil {
@@ -550,7 +672,29 @@ extension CloneGATTClient: CBPeripheralDelegate {
                 peripheral.readValue(for: char)
                 peripheral.setNotifyValue(true, for: char)
             }
+
+            // Read initial value if readable
+            if char.properties.contains(.read) && char.value == nil {
+                peripheral.readValue(for: char)
+            }
         }
+
+        let sInfo = DiscoveredGATTService(
+            uuid: service.uuid.uuidString,
+            name: serviceDisplayName(for: service.uuid),
+            characteristics: charInfos
+        )
+
+        DispatchQueue.main.async {
+            if let idx = self.discoveredServicesList.firstIndex(where: { $0.uuid == sInfo.uuid }) {
+                self.discoveredServicesList[idx] = sInfo
+            } else {
+                self.discoveredServicesList.append(sInfo)
+            }
+        }
+
+        // Dynamically bind the best active TX write characteristic
+        evaluateAndBindActiveWriteCharacteristic()
 
         matchDiscoveredServicesWithProfile()
 
@@ -560,8 +704,106 @@ extension CloneGATTClient: CBPeripheralDelegate {
         }
     }
 
+    public func evaluateAndBindActiveWriteCharacteristic() {
+        guard let services = targetPeripheral?.services else { return }
+
+        var candidateChars: [(char: CBCharacteristic, priority: Int)] = []
+
+        for service in services {
+            guard let characteristics = service.characteristics else { continue }
+            for char in characteristics {
+                guard char.properties.contains(.write) || char.properties.contains(.writeWithoutResponse) else { continue }
+
+                let uuidStr = char.uuid.uuidString.uppercased()
+                let sUuidStr = service.uuid.uuidString.uppercased()
+
+                var priority = 10
+
+                let isStandardService = sUuidStr.hasPrefix("00001800") || sUuidStr.hasPrefix("00001801") ||
+                                       sUuidStr.hasPrefix("0000180A") || sUuidStr.hasPrefix("0000180F")
+
+                if !isStandardService {
+                    priority = 50
+                }
+
+                // Known Vendor Priorities
+                if uuidStr == ChipsetDatabase.KnownUUIDs.airohaWriteChar.uuidString.uppercased() || uuidStr.contains("52414345") {
+                    priority = 100 // Airoha RACE Write
+                } else if uuidStr == ChipsetDatabase.KnownUUIDs.huilianWriteChar.uuidString.uppercased() || uuidStr.contains("FD01") {
+                    priority = 95 // Huilian Write
+                } else if uuidStr == ChipsetDatabase.KnownUUIDs.nordicUARTWriteChar.uuidString.uppercased() || uuidStr.contains("6E400002") {
+                    priority = 90 // Nordic / Bluetrum UART TX
+                } else if uuidStr == ChipsetDatabase.KnownUUIDs.besWriteChar.uuidString.uppercased() || uuidStr.contains("FE02") {
+                    priority = 85 // BES DataPath Write
+                } else if uuidStr == ChipsetDatabase.KnownUUIDs.jlWriteChar.uuidString.uppercased() || uuidStr.contains("AE01") {
+                    priority = 80 // JieLi Write
+                } else if uuidStr == ChipsetDatabase.KnownUUIDs.qualcommWriteChar.uuidString.uppercased() || uuidStr.contains("FE2D") {
+                    priority = 75 // Qualcomm Write
+                } else if uuidStr.contains("1562") || uuidStr.contains("FFE1") || uuidStr.contains("FFF1") || uuidStr.contains("AE02") {
+                    priority = 70 // Common clone custom vendor write
+                }
+
+                candidateChars.append((char: char, priority: priority))
+            }
+        }
+
+        candidateChars.sort { $0.priority > $1.priority }
+
+        if let best = candidateChars.first {
+            self.activeWriteCharacteristic = best.char
+            print("Dynamically bound active TX characteristic: \(best.char.uuid.uuidString) (Priority: \(best.priority), Properties: \(best.char.properties))")
+        }
+    }
+
+    public func serviceDisplayName(for uuid: CBUUID) -> String {
+        let u = uuid.uuidString.uppercased()
+        if u.contains("5052494D") { return "Airoha RACE Primary" }
+        if u.contains("DC405470") { return "Airoha Sony Variant" }
+        if u.contains("6E400001") { return "Nordic / Bluetrum UART" }
+        if u.contains("FE01") { return "BES DataPath" }
+        if u.contains("FD00") { return "Huilian Starlink" }
+        if u.contains("FE2C") { return "Qualcomm Service" }
+        if u.contains("AE00") { return "JieLi Command Service" }
+        if u.contains("180F") { return "Battery Service (0x180F)" }
+        if u.contains("180A") { return "Device Information (0x180A)" }
+        if u.contains("1800") { return "Generic Access (0x1800)" }
+        if u.contains("1801") { return "Generic Attribute (0x1801)" }
+        return "Service \(u.prefix(8))"
+    }
+
+    public func characteristicDisplayName(for uuid: CBUUID) -> String {
+        let u = uuid.uuidString.uppercased()
+        if u.contains("52414345") { return "Airoha RACE Write (TX)" }
+        if u.contains("4E4F5449") { return "Airoha RACE Notify (RX)" }
+        if u.contains("6E400002") { return "Nordic UART TX" }
+        if u.contains("6E400003") { return "Nordic UART RX" }
+        if u.contains("FE02") { return "BES Write (TX)" }
+        if u.contains("FE03") { return "BES Notify (RX)" }
+        if u.contains("FD01") { return "Huilian Write (TX)" }
+        if u.contains("FD02") { return "Huilian Notify (RX)" }
+        if u.contains("FE2D") { return "Qualcomm Write (TX)" }
+        if u.contains("FE2E") { return "Qualcomm Notify (RX)" }
+        if u.contains("AE01") { return "JieLi Write (TX)" }
+        if u.contains("AE02") { return "JieLi Notify (RX)" }
+        if u.contains("2A19") { return "Battery Level" }
+        if u.contains("2A00") { return "Device Name" }
+        return "Char \(u.prefix(8))"
+    }
+
     public func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         guard let data = characteristic.value, !data.isEmpty else { return }
+
+        let hex = data.map { String(format: "%02X", $0) }.joined()
+
+        DispatchQueue.main.async {
+            for sIdx in 0..<self.discoveredServicesList.count {
+                if let cIdx = self.discoveredServicesList[sIdx].characteristics.firstIndex(where: { $0.uuid == characteristic.uuid.uuidString }) {
+                    self.discoveredServicesList[sIdx].characteristics[cIdx].valueHex = hex
+                }
+            }
+            self.lastReceivedHex = hex
+            self.lastGATTStatus = "RX ACK: \(hex)"
+        }
 
         // Standard BLE Battery Level read (0x2A19)
         if characteristic.uuid == ContinuityDecoder.batteryLevelCharUUID {
@@ -572,12 +814,6 @@ extension CloneGATTClient: CBPeripheralDelegate {
             }
         }
 
-        let hex = data.map { String(format: "%02X", $0) }.joined()
-        DispatchQueue.main.async {
-            self.lastReceivedHex = hex
-            self.lastGATTStatus = "RX ACK: \(hex)"
-        }
-
         let record = GATTPacketRecord(
             timestamp: Date(),
             direction: .rx,
@@ -586,6 +822,7 @@ extension CloneGATTClient: CBPeripheralDelegate {
             payloadHex: hex,
             rawBytes: [UInt8](data)
         )
+        PacketDiffEngine.shared.recordPacket(record)
         onPacketCaptured?(record)
 
         // Parse RACE Diagnostic responses (Sync: 0x05, 0x5A)

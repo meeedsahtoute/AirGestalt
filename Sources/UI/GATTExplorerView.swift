@@ -18,6 +18,7 @@ public struct GATTExplorerView: View {
     @State private var exportVendor: ChipsetVendor = .airoha
     @State private var exportChipsetName: String = "AB1562A"
     @State private var isShowingExportSheet: Bool = false
+    @State private var isShowingScannerSheet: Bool = false
     @State private var copyConfirmation: Bool = false
 
     public init() {}
@@ -38,6 +39,69 @@ public struct GATTExplorerView: View {
                         .padding(.horizontal, 20)
                 }
                 .padding(.top, 10)
+
+                // Prominent BLE Connection & Scanner Card
+                VStack(spacing: 12) {
+                    HStack {
+                        HStack(spacing: 10) {
+                            Circle()
+                                .fill(gattClient.isConnected ? Color.green : (gattClient.isConnecting ? Color.orange : Color.red))
+                                .frame(width: 12, height: 12)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(gattClient.isConnected ? (gattClient.connectedPeripheralName ?? "Earbud Connected") : "BLE Offline")
+                                    .font(.system(size: 15, weight: .bold))
+                                    .foregroundColor(.primary)
+
+                                Text(gattClient.isConnected ? "Active TX: \(gattClient.activeWriteCharacteristicUUID ?? "Auto-bound")" : "Tap 'Scan & Connect' to pair clone earbud")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+
+                        Spacer()
+
+                        if gattClient.isConnected {
+                            Button(action: {
+                                HapticFeedbackManager.shared.buttonTap()
+                                gattClient.disconnect()
+                            }) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "xmark.circle")
+                                    Text("Disconnect")
+                                }
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(.red)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(Color.red.opacity(0.12))
+                                .clipShape(Capsule())
+                            }
+                        } else {
+                            Button(action: {
+                                HapticFeedbackManager.shared.buttonTap()
+                                isShowingScannerSheet = true
+                            }) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "antenna.radiowaves.left.and.right")
+                                    Text("Scan & Connect")
+                                }
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .background(Color.blue)
+                                .clipShape(Capsule())
+                            }
+                        }
+                    }
+                }
+                .padding(16)
+                .background(
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .fill(Color(uiColor: .secondarySystemBackground))
+                )
+                .padding(.horizontal, 16)
 
                 // Recording Control Bar Card
                 VStack(spacing: 12) {
@@ -235,6 +299,15 @@ public struct GATTExplorerView: View {
                 )
                 .padding(.horizontal, 16)
 
+                // Discovered GATT Services Inspector Card
+                GATTServiceInspectorCard(
+                    services: gattClient.discoveredServicesList,
+                    isConnected: gattClient.isConnected,
+                    onScanTap: {
+                        isShowingScannerSheet = true
+                    }
+                )
+
                 // Captured Packet Stream List
                 VStack(alignment: .leading, spacing: 10) {
                     Text("PACKET CAPTURE STREAM")
@@ -267,6 +340,9 @@ public struct GATTExplorerView: View {
                 chipsetName: $exportChipsetName,
                 jsonContent: diffEngine.generatedJSONProfile ?? "{}"
             )
+        }
+        .sheet(isPresented: $isShowingScannerSheet) {
+            BLEScannerView()
         }
     }
 }
@@ -373,3 +449,127 @@ private struct ProfileExportSheet: View {
         }
     }
 }
+
+// MARK: - Discovered GATT Services Inspector Component
+
+private struct GATTServiceInspectorCard: View {
+    let services: [DiscoveredGATTService]
+    let isConnected: Bool
+    let onScanTap: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("DISCOVERED GATT SERVICES & CHARACTERISTICS")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.secondary)
+
+                Spacer()
+
+                if isConnected {
+                    Text("\(services.count) services")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(.blue)
+                }
+            }
+
+            if !isConnected {
+                VStack(spacing: 8) {
+                    Text("Earbud disconnected. Connect to inspect GATT tree.")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+
+                    Button("Scan & Connect") {
+                        onScanTap()
+                    }
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(.blue)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+            } else if services.isEmpty {
+                HStack {
+                    ProgressView()
+                        .frame(width: 16, height: 16)
+                    Text("Discovering GATT services & characteristics...")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.vertical, 12)
+            } else {
+                VStack(spacing: 10) {
+                    ForEach(services) { service in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Image(systemName: "folder.fill")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.blue)
+
+                                Text(service.name)
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundColor(.primary)
+
+                                Spacer()
+
+                                Text(String(service.uuid.prefix(8)) + "...")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                            }
+
+                            ForEach(service.characteristics) { char in
+                                HStack(alignment: .top, spacing: 6) {
+                                    Image(systemName: "tag.fill")
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.purple)
+                                        .padding(.top, 2)
+
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(char.name)
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundColor(.primary)
+
+                                        Text(char.uuid)
+                                            .font(.system(size: 9, design: .monospaced))
+                                            .foregroundColor(.secondary)
+
+                                        if let val = char.valueHex, !val.isEmpty {
+                                            Text("Value: \(val)")
+                                                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                                .foregroundColor(.green)
+                                        }
+                                    }
+
+                                    Spacer()
+
+                                    HStack(spacing: 3) {
+                                        ForEach(char.properties, id: \.self) { prop in
+                                            Text(prop)
+                                                .font(.system(size: 8, weight: .bold))
+                                                .padding(.horizontal, 4)
+                                                .padding(.vertical, 2)
+                                                .background(Color.secondary.opacity(0.15))
+                                                .clipShape(Capsule())
+                                        }
+                                    }
+                                }
+                                .padding(.leading, 8)
+                                .padding(.vertical, 2)
+                            }
+                        }
+                        .padding(10)
+                        .background(Color(uiColor: .tertiarySystemBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color(uiColor: .secondarySystemBackground))
+        )
+        .padding(.horizontal, 16)
+    }
+}
+
+public typealias GATTLabView = GATTExplorerView

@@ -26,6 +26,8 @@ public struct DashboardView: View {
     // State for Sheets & UI modes
     @State private var isShowingDeviceSpoofer: Bool = false
     @State private var isShowingCalibratorSheet: Bool = false
+    @State private var isShowingScannerSheet: Bool = false
+    @State private var showOfflineToast: Bool = false
     @State private var isCase3DMode: Bool = false
 
     private var spoofedModel: AirPodsModel {
@@ -130,6 +132,55 @@ public struct DashboardView: View {
                 )
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
+
+                // BLE Offline Warning Banner (Shown if ANC tapped while disconnected)
+                if showOfflineToast && !gattClient.isConnected {
+                    HStack(spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange)
+                            .font(.system(size: 15))
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("BLE Offline: Earbud Disconnected")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(.primary)
+                            Text("Connect earbud to send hardware ANC commands.")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                        }
+
+                        Spacer()
+
+                        Button(action: {
+                            HapticFeedbackManager.shared.buttonTap()
+                            isShowingScannerSheet = true
+                        }) {
+                            Text("Connect")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(Color.blue)
+                                .clipShape(Capsule())
+                        }
+
+                        Button(action: {
+                            withAnimation {
+                                showOfflineToast = false
+                            }
+                        }) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(.secondary)
+                                .padding(4)
+                        }
+                    }
+                    .padding(10)
+                    .background(Color.orange.opacity(0.15))
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .padding(.horizontal, 16)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
 
                 // Native iOS Noise Control Segmented Pill
                 VStack(alignment: .leading, spacing: 10) {
@@ -361,6 +412,9 @@ public struct DashboardView: View {
         .sheet(isPresented: $isShowingCalibratorSheet) {
             AcousticCalibratorSheet(calibrator: calibrator)
         }
+        .sheet(isPresented: $isShowingScannerSheet) {
+            BLEScannerView()
+        }
         .sheet(isPresented: $gattClient.showDetectionSheet) {
             ChipsetDetectionSheet(gattClient: gattClient, audioEngine: audioEngine)
         }
@@ -393,20 +447,30 @@ public struct DashboardView: View {
 
             Spacer()
 
-            // Connection Indicator Badge
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(gattClient.isConnected ? Color.green : (continuityDecoder.latestFrame != nil ? Color.blue : Color.orange))
-                    .frame(width: 8, height: 8)
+            // Interactive Connection Indicator Badge / Scanner Opener
+            Button(action: {
+                HapticFeedbackManager.shared.buttonTap()
+                isShowingScannerSheet = true
+            }) {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(gattClient.isConnected ? Color.green : (gattClient.isConnecting ? Color.orange : Color.blue))
+                        .frame(width: 8, height: 8)
 
-                Text(gattClient.isConnected ? "GATT Active" : (continuityDecoder.latestFrame != nil ? "Continuity" : "Ready"))
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(.secondary)
+                    Text(gattClient.isConnected ? (gattClient.connectedPeripheralName ?? "Connected ✓") : (gattClient.isConnecting ? "Connecting..." : "Scan & Connect"))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(gattClient.isConnected ? .green : .primary)
+                        .lineLimit(1)
+
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(gattClient.isConnected ? Color.green.opacity(0.12) : Color.blue.opacity(0.12))
+                .clipShape(Capsule())
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(Color.secondary.opacity(0.12))
-            .clipShape(Capsule())
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 10)
@@ -421,6 +485,17 @@ public struct DashboardView: View {
     private func selectNoiseMode(_ mode: NoiseControlMode) {
         HapticFeedbackManager.shared.modeChanged()
         dspProcessor.setNoiseMode(mode)
+
+        if !gattClient.isConnected {
+            withAnimation {
+                showOfflineToast = true
+            }
+        } else {
+            withAnimation {
+                showOfflineToast = false
+            }
+        }
+
         gattClient.sendNoiseMode(mode)
 
         // Hardware BLE controls must NEVER touch AVAudioSession!
