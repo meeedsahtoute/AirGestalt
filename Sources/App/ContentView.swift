@@ -54,11 +54,6 @@ public struct ContentView: View {
         }
         .onAppear {
             continuityDecoder.startScanning()
-            do {
-                try SharedAudioEngine.shared.startEngine()
-            } catch {
-                print("Audio Engine startup error: \(error)")
-            }
         }
     }
 }

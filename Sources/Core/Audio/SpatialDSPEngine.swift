@@ -162,6 +162,11 @@ public final class SpatialDSPEngine: ObservableObject {
                 } else {
                     self.fitTestResultMessage = "Adjust Tip Fit (Acoustic Seal Leakage Detected)"
                 }
+
+                // Deactivate engine after fit test completes if not monitoring or passthrough
+                if !SharedAudioEngine.shared.isSoftwareTransparencyActive && !SharedAudioEngine.shared.isAmbientMonitoringActive {
+                    SharedAudioEngine.shared.stopEngine()
+                }
             }
         }
     }
@@ -231,6 +236,9 @@ public final class SpatialDSPEngine: ObservableObject {
         isPlayingFindMyChirp = false
         chirpTimer?.invalidate()
         chirpTimer = nil
+        if !SharedAudioEngine.shared.isSoftwareTransparencyActive && !SharedAudioEngine.shared.isAmbientMonitoringActive {
+            SharedAudioEngine.shared.stopEngine()
+        }
     }
 
     private func playChirpBurst(pan: Float) {

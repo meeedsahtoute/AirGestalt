@@ -108,6 +108,9 @@ public final class AutoLatencyCalibrator: ObservableObject {
                 self.computeLatencyFromRecording()
                 self.isCalibrating = false
                 self.statusMessage = String(format: "Calibrated: %.1f ms delay locked", self.effectiveTotalDelayMs)
+                if !SharedAudioEngine.shared.isSoftwareTransparencyActive && !SharedAudioEngine.shared.isAmbientMonitoringActive {
+                    SharedAudioEngine.shared.stopEngine()
+                }
             }
         }
     }

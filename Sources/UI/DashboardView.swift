@@ -170,18 +170,36 @@ public struct DashboardView: View {
                                 .font(.system(size: 11, weight: .semibold))
                                 .foregroundColor(.secondary)
 
-                            if dspProcessor.ambientSPLdB > 10.0 {
+                            if audioEngine.isAmbientMonitoringActive && dspProcessor.ambientSPLdB > 10.0 {
                                 Text(String(format: "Ambient Sound Level: %.1f dB SPL", dspProcessor.ambientSPLdB))
                                     .font(.system(size: 14, weight: .bold, design: .rounded))
                                     .foregroundColor(.primary)
                             } else {
-                                Text("Ambient Sound Level: — dB SPL (Idle)")
+                                Text(audioEngine.isAmbientMonitoringActive ? "Ambient Sound Level: Listening..." : "Ambient Sound Level: Inactive")
                                     .font(.system(size: 14, weight: .bold, design: .rounded))
                                     .foregroundColor(.secondary)
                             }
                         }
 
                         Spacer()
+
+                        // Explicit Live Ambient Monitoring Toggle Button
+                        Button(action: {
+                            HapticFeedbackManager.shared.buttonTap()
+                            let newActive = !audioEngine.isAmbientMonitoringActive
+                            audioEngine.setAmbientMonitoringActive(newActive)
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: audioEngine.isAmbientMonitoringActive ? "stop.fill" : "waveform.badge.mic")
+                                Text(audioEngine.isAmbientMonitoringActive ? "Stop" : "Monitor")
+                            }
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(audioEngine.isAmbientMonitoringActive ? .white : .blue)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(audioEngine.isAmbientMonitoringActive ? Color.red : Color.blue.opacity(0.12))
+                            .clipShape(Capsule())
+                        }
 
                         // Calibrate Button
                         Button(action: {
@@ -368,10 +386,18 @@ public struct DashboardView: View {
 
     private func selectNoiseMode(_ mode: NoiseControlMode) {
         HapticFeedbackManager.shared.modeChanged()
-        AudioChimeSynthesizer.shared.playModeSwitchChime(for: mode)
         dspProcessor.setNoiseMode(mode)
         gattClient.sendNoiseMode(mode)
-        audioEngine.setTransparencyActive(mode == .transparency)
+
+        if mode == .transparency {
+            audioEngine.setTransparencyActive(true)
+        } else {
+            audioEngine.setTransparencyActive(false)
+            // Clean deactivation: when switching to Off or Max ANC (hardware BLE), stop the engine and deactivate AVAudioSession
+            if !audioEngine.isAmbientMonitoringActive {
+                audioEngine.stopEngine()
+            }
+        }
     }
 }
 

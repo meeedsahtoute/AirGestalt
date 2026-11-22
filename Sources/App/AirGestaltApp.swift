@@ -26,13 +26,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
-        // Safely start SharedAudioEngine and prepare haptics
-        do {
-            try SharedAudioEngine.shared.startEngine()
-        } catch {
-            print("Audio engine initialization deferred: \(error)")
-        }
-
+        // Lazy Audio Engine: Do NOT activate AVAudioSession on launch to prevent pausing background music
         HapticFeedbackManager.shared.prepare()
         return true
     }

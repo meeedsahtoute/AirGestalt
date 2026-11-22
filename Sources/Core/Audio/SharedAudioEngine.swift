@@ -28,6 +28,7 @@ public final class SharedAudioEngine: ObservableObject {
     @Published public var isUsingEarbudMic: Bool = false
     @Published public var inputChannelCount: Int = 1
     @Published public var isSoftwareTransparencyActive: Bool = false
+    @Published public var isAmbientMonitoringActive: Bool = false
     @Published public var transparencyGain: Float = 1.0
 
     private var isTapInstalled: Bool = false
@@ -76,13 +77,18 @@ public final class SharedAudioEngine: ObservableObject {
         let session = AVAudioSession.sharedInstance()
         self.isUsingEarbudMic = forceEarbudMic
 
-        // Safe resilient audio session options supporting Bluetooth, A2DP, mixing, and speaker routing
-        let sessionOptions: AVAudioSession.CategoryOptions = [
-            .allowBluetooth,
-            .allowBluetoothA2DP,
+        // Non-interrupting mixing options:
+        // Strictly avoid .allowBluetooth (which forces HFP 16kHz call mode and pauses background music)
+        // unless forceEarbudMic is explicitly requested.
+        var sessionOptions: AVAudioSession.CategoryOptions = [
             .mixWithOthers,
+            .allowBluetoothA2DP,
             .defaultToSpeaker
         ]
+
+        if forceEarbudMic {
+            sessionOptions.insert(.allowBluetooth)
+        }
 
         try session.setCategory(.playAndRecord, mode: .default, options: sessionOptions)
 
@@ -137,12 +143,21 @@ public final class SharedAudioEngine: ObservableObject {
     }
 
     public func stopEngine() {
-        guard engine.isRunning else { return }
-        removeInputTapSafely()
-        playerNode.stop()
-        engine.stop()
-        DispatchQueue.main.async {
-            self.isRunning = false
+        engineQueue.async { [weak self] in
+            guard let self = self else { return }
+            if self.engine.isRunning {
+                self.removeInputTapSafely()
+                self.playerNode.stop()
+                self.engine.stop()
+            }
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            DispatchQueue.main.async {
+                self.isRunning = false
+                self.isSoftwareTransparencyActive = false
+                self.isAmbientMonitoringActive = false
+                VDSPAntiNoiseProcessor.shared.ambientSPLdB = 0.0
+                VDSPAntiNoiseProcessor.shared.frequencySpectrum = Array(repeating: 0.0, count: 24)
+            }
         }
     }
 
@@ -171,19 +186,47 @@ public final class SharedAudioEngine: ObservableObject {
         engineQueue.async { [weak self] in
             guard let self = self else { return }
 
-            if active && !self.engine.isRunning {
-                do {
-                    try self.startEngine()
-                } catch {
-                    print("SharedAudioEngine: Failed to start for transparency: \(error)")
+            if active {
+                if !self.engine.isRunning {
+                    do {
+                        try self.startEngine()
+                    } catch {
+                        print("SharedAudioEngine: Failed to start for transparency: \(error)")
+                    }
+                }
+                self.ensureNodesConnected()
+                self.transparencyMixer.outputVolume = safeGain
+            } else {
+                self.transparencyMixer.outputVolume = 0.0
+                if !self.isAmbientMonitoringActive {
+                    self.stopEngine()
                 }
             }
 
-            self.ensureNodesConnected()
-            self.transparencyMixer.outputVolume = active ? safeGain : 0.0
-
             DispatchQueue.main.async {
                 self.isSoftwareTransparencyActive = active
+            }
+        }
+    }
+
+    // MARK: - Ambient dB Monitoring
+
+    public func setAmbientMonitoringActive(_ active: Bool) {
+        self.isAmbientMonitoringActive = active
+        engineQueue.async { [weak self] in
+            guard let self = self else { return }
+            if active {
+                if !self.engine.isRunning {
+                    do {
+                        try self.startEngine()
+                    } catch {
+                        print("Failed to start engine for ambient monitoring: \(error)")
+                    }
+                }
+            } else {
+                if !self.isSoftwareTransparencyActive {
+                    self.stopEngine()
+                }
             }
         }
     }
@@ -341,8 +384,10 @@ public final class SharedAudioEngine: ObservableObject {
     }
 
     @objc private func handleAudioRouteChange(_ notification: Notification) {
+        updateActiveRoute()
+        guard engine.isRunning else { return }
         engineQueue.async { [weak self] in
-            guard let self = self else { return }
+            guard let self = self, self.engine.isRunning else { return }
             self.removeInputTapSafely()
 
             do {
@@ -358,13 +403,15 @@ public final class SharedAudioEngine: ObservableObject {
     }
 
     @objc private func handleAudioInterruption(_ notification: Notification) {
+        guard engine.isRunning else { return }
         guard let info = notification.userInfo,
               let typeValue = info[AVAudioSessionInterruptionTypeKey] as? UInt,
               let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
 
         if type == .ended {
             engineQueue.async { [weak self] in
-                try? self?.startEngine()
+                guard let self = self, self.isRunning else { return }
+                try? self.startEngine()
             }
         }
     }

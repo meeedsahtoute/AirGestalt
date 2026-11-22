@@ -114,6 +114,7 @@ public final class ProMicEngine: NSObject, ObservableObject, AVAudioPlayerDelega
     public func setMicMode(_ mode: VoiceMicMode) {
         self.activeMicMode = mode
 
+        guard SharedAudioEngine.shared.isRunning else { return }
         let inputNode = SharedAudioEngine.shared.engine.inputNode
         switch mode {
         case .standard:
@@ -139,10 +140,12 @@ public final class ProMicEngine: NSObject, ObservableObject, AVAudioPlayerDelega
 
     public func toggleMicrophoneSource(useEarbudMic: Bool) {
         self.isUsingEarbudMic = useEarbudMic
-        do {
-            try SharedAudioEngine.shared.configureAudioSession(forceEarbudMic: useEarbudMic)
-        } catch {
-            print("Failed to switch audio session microphone route: \(error)")
+        if SharedAudioEngine.shared.isRunning {
+            do {
+                try SharedAudioEngine.shared.configureAudioSession(forceEarbudMic: useEarbudMic)
+            } catch {
+                print("Failed to switch audio session microphone route: \(error)")
+            }
         }
     }
 

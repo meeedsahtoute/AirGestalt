@@ -12,6 +12,7 @@ import AVFoundation
 
 public struct MicStudioView: View {
     @ObservedObject var proMic = ProMicEngine.shared
+    @ObservedObject var audioEngine = SharedAudioEngine.shared
     @State private var isShowingShareSheet: Bool = false
 
     public init() {}
@@ -124,15 +125,35 @@ public struct MicStudioView: View {
                 // Live vDSP VU / dB Audio Meter Card
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Text("LIVE INPUT VU METER")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(.secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("LIVE INPUT VU METER")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(.secondary)
+
+                            Text(audioEngine.isRunning ? String(format: "Peak: %.1f dBFS", proMic.peakLevelDb) : "Engine Inactive")
+                                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                .foregroundColor(audioEngine.isRunning ? .primary : .secondary)
+                        }
 
                         Spacer()
 
-                        Text(String(format: "Peak: %.1f dBFS", proMic.peakLevelDb))
-                            .font(.system(size: 12, weight: .bold, design: .monospaced))
-                            .foregroundColor(.primary)
+                        // Explicit Mic Passthrough Toggle Button
+                        Button(action: {
+                            HapticFeedbackManager.shared.buttonTap()
+                            let newActive = !audioEngine.isSoftwareTransparencyActive
+                            audioEngine.setTransparencyActive(newActive)
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: audioEngine.isSoftwareTransparencyActive ? "stop.fill" : "waveform.badge.mic")
+                                Text(audioEngine.isSoftwareTransparencyActive ? "Stop Passthrough" : "Mic Passthrough")
+                            }
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(audioEngine.isSoftwareTransparencyActive ? .white : .blue)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(audioEngine.isSoftwareTransparencyActive ? Color.red : Color.blue.opacity(0.12))
+                            .clipShape(Capsule())
+                        }
                     }
 
                     // Progress Bar Meter
@@ -282,6 +303,18 @@ public struct MicStudioView: View {
         .sheet(isPresented: $isShowingShareSheet) {
             if let url = proMic.recordedFileURL {
                 ShareActivityView(activityItems: [url])
+            }
+        }
+        .onDisappear {
+            // Clean Deactivation: when leaving Mic Studio, stop recording and stop engine
+            if proMic.isRecording {
+                proMic.stopRecording()
+            }
+            if proMic.isPlayingComparison {
+                proMic.stopComparison()
+            }
+            if !audioEngine.isAmbientMonitoringActive {
+                audioEngine.stopEngine()
             }
         }
     }
