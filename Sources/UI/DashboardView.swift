@@ -16,7 +16,7 @@ public struct DashboardView: View {
     @ObservedObject var gattClient = CloneGATTClient.shared
     @ObservedObject var dspProcessor = VDSPAntiNoiseProcessor.shared
     @ObservedObject var calibrator = AutoLatencyCalibrator.shared
-    @ObservedObject var audioEngine = SharedAudioEngine.shared
+    @ObservedObject var audioEngine = GhostAudioEngine.shared
 
     // Persistent State for Custom Device Spoofer
     @AppStorage("com.airgestalt.spoofedDeviceName") private var spoofedDeviceName: String = "AirPods Pro 2"
@@ -83,6 +83,11 @@ public struct DashboardView: View {
     public var body: some View {
         ScrollView(showsIndicators: false) {
             VStack(spacing: 20) {
+                // Ghost Mode Active Glowing Indicator Badge
+                if audioEngine.isGhostModeActive || audioEngine.isSoftwareTransparencyActive {
+                    ghostModeBanner
+                }
+
                 // 3D Procedural Earbud Model Card
                 VStack(spacing: 10) {
                     ZStack(alignment: .topTrailing) {
@@ -471,7 +476,7 @@ public struct DashboardView: View {
                     }
 
                     HStack(spacing: 4) {
-                        Text("AirGestalt")
+                        Text(audioEngine.activeRouteConnectionType)
                             .font(.system(size: 10, weight: .bold))
                             .foregroundColor(.cyan)
 
@@ -479,7 +484,7 @@ public struct DashboardView: View {
                             .font(.system(size: 8))
                             .foregroundColor(.secondary)
 
-                        Text("Serial: \(spoofedSerialNumber) • \(currentFrame.model.badgeName)")
+                        Text("\(audioEngine.currentSampleRateString) • ID: \(audioEngine.activeRouteUID)")
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
                             .foregroundColor(.secondary)
                             .lineLimit(1)
@@ -524,6 +529,67 @@ public struct DashboardView: View {
         )
     }
 
+    // MARK: - Ghost Mode Active Indicator Card
+
+    private var ghostModeBanner: some View {
+        HStack(spacing: 10) {
+            ZStack {
+                Circle()
+                    .fill(Color.cyan)
+                    .frame(width: 10, height: 10)
+                Circle()
+                    .stroke(Color.cyan.opacity(0.4), lineWidth: 4)
+                    .frame(width: 18, height: 18)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text("GHOST MODE ACTIVE")
+                        .font(.system(size: 11, weight: .black, design: .rounded))
+                        .foregroundColor(.cyan)
+
+                    Text("•")
+                        .foregroundColor(.secondary)
+
+                    Text(audioEngine.isSoftwareTransparencyActive ? "Software Transparency ON" : "Background DSP Engine")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.primary)
+                }
+
+                Text("Ultra-low latency DSP (5ms) • 10-Band Live EQ • Background Audio Session")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            Button(action: {
+                HapticFeedbackManager.shared.buttonTap()
+                audioEngine.setGhostModeActive(false)
+                audioEngine.setTransparencyActive(false)
+            }) {
+                Image(systemName: "power")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(.red)
+                    .padding(6)
+                    .background(Color.red.opacity(0.12))
+                    .clipShape(Circle())
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color(red: 10/255, green: 20/255, blue: 32/255))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(Color.cyan.opacity(0.45), lineWidth: 1)
+                )
+                .shadow(color: Color.cyan.opacity(0.25), radius: 6, x: 0, y: 0)
+        )
+        .padding(.horizontal, 16)
+        .transition(.move(edge: .top).combined(with: .opacity))
+    }
+
     private func selectNoiseMode(_ mode: NoiseControlMode) {
         HapticFeedbackManager.shared.modeChanged()
         dspProcessor.setNoiseMode(mode)
@@ -538,16 +604,21 @@ public struct DashboardView: View {
             }
         }
 
+        // Send hardware GATT command to clone earbuds if connected
         gattClient.sendNoiseMode(mode)
 
-        // Hardware BLE controls must NEVER touch AVAudioSession!
-        // We only deactivate software transparency if it was previously active.
-        if audioEngine.isSoftwareTransparencyActive {
-            audioEngine.setTransparencyActive(false)
-            if !audioEngine.isAmbientMonitoringActive {
-                audioEngine.stopEngine()
+        // Real Software Transparency:
+        // When Transparency is selected, route iPhone microphone -> 10-band EQ -> Varispeed -> earbuds
+        if mode == .transparency {
+            audioEngine.setTransparencyActive(true)
+        } else {
+            if audioEngine.isSoftwareTransparencyActive {
+                audioEngine.setTransparencyActive(false)
             }
         }
+
+        // Play authentic Apple-style mode switch chime
+        AudioChimeSynthesizer.shared.playModeSwitchChime(for: mode)
     }
 }
 
@@ -632,7 +703,7 @@ private struct BatteryStatusCard: View {
 
 private struct ChipsetDetectionSheet: View {
     @ObservedObject var gattClient: CloneGATTClient
-    @ObservedObject var audioEngine: SharedAudioEngine
+    @ObservedObject var audioEngine: GhostAudioEngine
     @Environment(\.dismiss) var dismiss
 
     var body: some View {

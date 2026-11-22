@@ -34,7 +34,7 @@ public final class AudioChimeSynthesizer {
         }
 
         if let pcm = buffer {
-            SharedAudioEngine.shared.scheduleBufferSafely(pcm)
+            GhostAudioEngine.shared.scheduleBufferSafely(pcm)
         }
     }
 

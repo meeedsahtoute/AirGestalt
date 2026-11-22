@@ -82,7 +82,7 @@ public final class AutoLatencyCalibrator: ObservableObject {
         statusMessage = "Starting acoustic environment scan..."
         recordedSamples.removeAll()
 
-        // 1. Play chirp through SharedAudioEngine playerNode
+        // 1. Play chirp through GhostAudioEngine playerNode
         playChirpAudio()
 
         // 2. Progress step updates over 3 seconds
@@ -108,8 +108,8 @@ public final class AutoLatencyCalibrator: ObservableObject {
                 self.computeLatencyFromRecording()
                 self.isCalibrating = false
                 self.statusMessage = String(format: "Calibrated: %.1f ms delay locked", self.effectiveTotalDelayMs)
-                if !SharedAudioEngine.shared.isSoftwareTransparencyActive && !SharedAudioEngine.shared.isAmbientMonitoringActive {
-                    SharedAudioEngine.shared.stopEngine()
+                if !GhostAudioEngine.shared.isSoftwareTransparencyActive && !GhostAudioEngine.shared.isAmbientMonitoringActive && !GhostAudioEngine.shared.isGhostModeActive {
+                    GhostAudioEngine.shared.stopEngine()
                 }
             }
         }
@@ -125,7 +125,7 @@ public final class AutoLatencyCalibrator: ObservableObject {
             memcpy(right, referenceChirp, referenceChirp.count * MemoryLayout<Float>.size)
         }
 
-        SharedAudioEngine.shared.scheduleBufferSafely(pcmBuffer)
+        GhostAudioEngine.shared.scheduleBufferSafely(pcmBuffer)
     }
 
     // Capture incoming microphone samples during calibration

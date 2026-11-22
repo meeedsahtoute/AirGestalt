@@ -11,26 +11,13 @@ import SwiftUI
 public struct EQAndToolsView: View {
     @ObservedObject var spatialDSP = SpatialDSPEngine.shared
     @ObservedObject var gattClient = CloneGATTClient.shared
+    @ObservedObject var audioEngine = GhostAudioEngine.shared
 
     public init() {}
 
     public var body: some View {
         ScrollView(showsIndicators: false) {
             VStack(spacing: 20) {
-                // Header
-                VStack(spacing: 4) {
-                    Text("10-Band EQ & Acoustic Tools")
-                        .font(.system(size: 24, weight: .bold, design: .rounded))
-                        .foregroundColor(.primary)
-
-                    Text("Parametric equalization, acoustic tip fit, Find My beacon & 3D head tracking")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 20)
-                }
-                .padding(.top, 10)
-
                 // 10-Band Parametric Equalizer Card
                 VStack(alignment: .leading, spacing: 14) {
                     HStack {
@@ -46,13 +33,30 @@ public struct EQAndToolsView: View {
 
                         Spacer()
 
+                        // Test Audio / Bass Loop Button
+                        Button(action: {
+                            HapticFeedbackManager.shared.buttonTap()
+                            audioEngine.toggleTestAudioLoop()
+                        }) {
+                            HStack(spacing: 5) {
+                                Image(systemName: audioEngine.isPlayingTestAudio ? "stop.circle.fill" : "play.circle.fill")
+                                    .font(.system(size: 13, weight: .bold))
+                                Text(audioEngine.isPlayingTestAudio ? "Stop Bass Loop" : "Test Bass Loop")
+                                    .font(.system(size: 11, weight: .bold))
+                            }
+                            .foregroundColor(audioEngine.isPlayingTestAudio ? .white : .cyan)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(audioEngine.isPlayingTestAudio ? Color.red : Color.cyan.opacity(0.15))
+                            .clipShape(Capsule())
+                        }
+
                         // Preset Menu
                         Menu {
                             ForEach(EQPreset.allPresets) { preset in
                                 Button(action: {
                                     HapticFeedbackManager.shared.selectionChanged()
                                     spatialDSP.applyPreset(preset)
-                                    gattClient.sendHardwareEQPreset(preset)
                                 }) {
                                     Label(preset.name, systemImage: preset.iconName)
                                 }
@@ -69,6 +73,20 @@ public struct EQAndToolsView: View {
                             .background(Color.blue.opacity(0.12))
                             .clipShape(Capsule())
                         }
+                    }
+
+                    if audioEngine.isPlayingTestAudio {
+                        HStack(spacing: 6) {
+                            Image(systemName: "waveform")
+                                .foregroundColor(.cyan)
+                                .font(.system(size: 12))
+                            Text("Audible Test Track Playing: Adjust sliders to hear 32Hz sub-bass to 16kHz air in real time!")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(.cyan)
+                        }
+                        .padding(8)
+                        .background(Color.cyan.opacity(0.10))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     }
 
                     // Horizontal Scrollable Sliders for 10 Bands
@@ -93,6 +111,7 @@ public struct EQAndToolsView: View {
                         .fill(Color(uiColor: .secondarySystemBackground))
                 )
                 .padding(.horizontal, 16)
+                .padding(.top, 8)
 
                 // Ear Tip Fit Test Card (Zero-Mock Acoustic Analysis)
                 VStack(alignment: .leading, spacing: 12) {
@@ -254,6 +273,63 @@ public struct EQAndToolsView: View {
                 .padding(.bottom, 24)
             }
         }
+        .safeAreaInset(edge: .top) {
+            pinnedHeaderView
+        }
+    }
+
+    private var pinnedHeaderView: some View {
+        HStack(alignment: .center) {
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle()
+                        .fill(Color(red: 20/255, green: 25/255, blue: 40/255))
+                        .frame(width: 34, height: 34)
+                        .overlay(Circle().stroke(Color.cyan.opacity(0.6), lineWidth: 1))
+
+                    Image(systemName: "slider.vertical.3")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(.cyan)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("10-Band EQ & Acoustic Tools")
+                        .font(.system(size: 18, weight: .bold, design: .rounded))
+                        .foregroundColor(.primary)
+
+                    Text(audioEngine.isPlayingTestAudio ? "Acoustic Test Loop Running (48kHz)" : "Parametric Equalizer • Tip Fit • Spatial")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(audioEngine.isPlayingTestAudio ? .cyan : .secondary)
+                }
+            }
+
+            Spacer()
+
+            Button(action: {
+                HapticFeedbackManager.shared.buttonTap()
+                audioEngine.toggleTestAudioLoop()
+            }) {
+                HStack(spacing: 5) {
+                    Image(systemName: audioEngine.isPlayingTestAudio ? "stop.fill" : "play.fill")
+                        .font(.system(size: 10))
+                    Text(audioEngine.isPlayingTestAudio ? "Stop" : "Test Loop")
+                        .font(.system(size: 11, weight: .bold))
+                }
+                .foregroundColor(audioEngine.isPlayingTestAudio ? .white : .cyan)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(audioEngine.isPlayingTestAudio ? Color.red : Color.cyan.opacity(0.14))
+                .clipShape(Capsule())
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
+        .background(
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .ignoresSafeArea(edges: .top)
+                .overlay(Divider().opacity(0.25), alignment: .bottom)
+        )
     }
 }
 

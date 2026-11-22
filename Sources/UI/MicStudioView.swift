@@ -12,7 +12,7 @@ import AVFoundation
 
 public struct MicStudioView: View {
     @ObservedObject var proMic = ProMicEngine.shared
-    @ObservedObject var audioEngine = SharedAudioEngine.shared
+    @ObservedObject var audioEngine = GhostAudioEngine.shared
     @State private var isShowingShareSheet: Bool = false
 
     public init() {}
@@ -20,20 +20,6 @@ public struct MicStudioView: View {
     public var body: some View {
         ScrollView(showsIndicators: false) {
             VStack(spacing: 20) {
-                // Header
-                VStack(spacing: 4) {
-                    Text("Mic Studio & Voice Isolation")
-                        .font(.system(size: 24, weight: .bold, design: .rounded))
-                        .foregroundColor(.primary)
-
-                    Text("Broadcast-quality vocal capture without Bluetooth HFP bitrate drops")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 20)
-                }
-                .padding(.top, 10)
-
                 // Anti-HFP Studio Routing Switch Card
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
@@ -300,23 +286,82 @@ public struct MicStudioView: View {
                 .padding(.bottom, 24)
             }
         }
+        .safeAreaInset(edge: .top) {
+            pinnedHeaderView
+        }
         .sheet(isPresented: $isShowingShareSheet) {
             if let url = proMic.recordedFileURL {
                 ShareActivityView(activityItems: [url])
             }
         }
         .onDisappear {
-            // Clean Deactivation: when leaving Mic Studio, stop recording and stop engine
+            // Clean Deactivation: when leaving Mic Studio, stop recording and comparison
             if proMic.isRecording {
                 proMic.stopRecording()
             }
             if proMic.isPlayingComparison {
                 proMic.stopComparison()
             }
-            if !audioEngine.isAmbientMonitoringActive {
+            if !audioEngine.isAmbientMonitoringActive && !audioEngine.isSoftwareTransparencyActive && !audioEngine.isGhostModeActive {
                 audioEngine.stopEngine()
             }
         }
+    }
+
+    private var pinnedHeaderView: some View {
+        HStack(alignment: .center) {
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle()
+                        .fill(Color(red: 20/255, green: 25/255, blue: 40/255))
+                        .frame(width: 34, height: 34)
+                        .overlay(Circle().stroke(Color.blue.opacity(0.6), lineWidth: 1))
+
+                    Image(systemName: "mic.badge.plus")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(.blue)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Mic Studio & Voice Isolation")
+                        .font(.system(size: 18, weight: .bold, design: .rounded))
+                        .foregroundColor(.primary)
+
+                    Text(proMic.isUsingEarbudMic ? "SCO 16kHz Call Channel" : "Studio 48kHz A2DP Routing")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(proMic.isUsingEarbudMic ? .orange : .blue)
+                }
+            }
+
+            Spacer()
+
+            // Passthrough quick toggle pill
+            Button(action: {
+                HapticFeedbackManager.shared.buttonTap()
+                let newActive = !audioEngine.isSoftwareTransparencyActive
+                audioEngine.setTransparencyActive(newActive)
+            }) {
+                HStack(spacing: 4) {
+                    Image(systemName: audioEngine.isSoftwareTransparencyActive ? "stop.fill" : "waveform.badge.mic")
+                        .font(.system(size: 10))
+                    Text(audioEngine.isSoftwareTransparencyActive ? "Passthrough ON" : "Passthrough")
+                        .font(.system(size: 11, weight: .bold))
+                }
+                .foregroundColor(audioEngine.isSoftwareTransparencyActive ? .white : .blue)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(audioEngine.isSoftwareTransparencyActive ? Color.red : Color.blue.opacity(0.14))
+                .clipShape(Capsule())
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
+        .background(
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .ignoresSafeArea(edges: .top)
+                .overlay(Divider().opacity(0.25), alignment: .bottom)
+        )
     }
 }
 

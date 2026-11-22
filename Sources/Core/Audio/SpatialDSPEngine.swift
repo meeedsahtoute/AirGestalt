@@ -63,13 +63,8 @@ public final class SpatialDSPEngine: ObservableObject {
         currentGains = preset.bandGains
         UserDefaults.standard.set(currentGains, forKey: "com.airgestalt.eqGains")
 
-        // Update live EQ node if engine is currently running
-        if let eq = SharedAudioEngine.shared.eqNode {
-            for (index, gain) in preset.bandGains.enumerated() {
-                guard index < eq.bands.count else { break }
-                eq.bands[index].gain = gain
-            }
-        }
+        // Update live EQ node in GhostAudioEngine in real time
+        GhostAudioEngine.shared.updateAllLiveEQBands(gains: preset.bandGains)
 
         // Send Hardware EQ GATT command over BLE to clone earbuds without touching audio session
         CloneGATTClient.shared.sendHardwareEQPreset(preset)
@@ -80,10 +75,8 @@ public final class SpatialDSPEngine: ObservableObject {
         currentGains[index] = gain
         UserDefaults.standard.set(currentGains, forKey: "com.airgestalt.eqGains")
 
-        // Update live EQ node if engine is currently running
-        if let eq = SharedAudioEngine.shared.eqNode, index < eq.bands.count {
-            eq.bands[index].gain = gain
-        }
+        // Update live EQ node in GhostAudioEngine in real time
+        GhostAudioEngine.shared.updateLiveEQGain(bandIndex: index, gain: gain)
     }
 
     // MARK: - Real Acoustic Ear Tip Fit Test (Zero-Mock)
@@ -163,8 +156,8 @@ public final class SpatialDSPEngine: ObservableObject {
                 }
 
                 // Deactivate engine after fit test completes if not monitoring or passthrough
-                if !SharedAudioEngine.shared.isSoftwareTransparencyActive && !SharedAudioEngine.shared.isAmbientMonitoringActive {
-                    SharedAudioEngine.shared.stopEngine()
+                if !GhostAudioEngine.shared.isSoftwareTransparencyActive && !GhostAudioEngine.shared.isAmbientMonitoringActive && !GhostAudioEngine.shared.isGhostModeActive {
+                    GhostAudioEngine.shared.stopEngine()
                 }
             }
         }
@@ -212,10 +205,14 @@ public final class SpatialDSPEngine: ObservableObject {
             memcpy(right, sweep, totalSamples * MemoryLayout<Float>.size)
         }
 
-        SharedAudioEngine.shared.scheduleBufferSafely(pcm)
+        GhostAudioEngine.shared.scheduleBufferSafely(pcm)
     }
 
     // MARK: - Stereo Find My Chirp (2kHz - 4kHz High-Pitched Pulsed Beacon)
+
+    public func playFindMyChirp() {
+        startFindMyChirp(channel: "Both")
+    }
 
     public func startFindMyChirp(channel: String = "Both") {
         isPlayingFindMyChirp = true
@@ -235,8 +232,8 @@ public final class SpatialDSPEngine: ObservableObject {
         isPlayingFindMyChirp = false
         chirpTimer?.invalidate()
         chirpTimer = nil
-        if !SharedAudioEngine.shared.isSoftwareTransparencyActive && !SharedAudioEngine.shared.isAmbientMonitoringActive {
-            SharedAudioEngine.shared.stopEngine()
+        if !GhostAudioEngine.shared.isSoftwareTransparencyActive && !GhostAudioEngine.shared.isAmbientMonitoringActive && !GhostAudioEngine.shared.isGhostModeActive {
+            GhostAudioEngine.shared.stopEngine()
         }
     }
 
@@ -269,7 +266,7 @@ public final class SpatialDSPEngine: ObservableObject {
             }
         }
 
-        SharedAudioEngine.shared.scheduleBufferSafely(pcm)
+        GhostAudioEngine.shared.scheduleBufferSafely(pcm)
     }
 
     // MARK: - CoreMotion Head Tracking & Simulated Spatial Audio

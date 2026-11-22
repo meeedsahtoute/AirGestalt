@@ -118,7 +118,7 @@ public final class ProMicEngine: NSObject, ObservableObject, AVAudioPlayerDelega
     public func setMicMode(_ mode: VoiceMicMode) {
         self.activeMicMode = mode
 
-        guard SharedAudioEngine.shared.isRunning, let engine = SharedAudioEngine.shared.engine else { return }
+        guard GhostAudioEngine.shared.isRunning, let engine = GhostAudioEngine.shared.engine else { return }
         let inputNode = engine.inputNode
         switch mode {
         case .standard:
@@ -147,9 +147,9 @@ public final class ProMicEngine: NSObject, ObservableObject, AVAudioPlayerDelega
 
     public func toggleMicrophoneSource(useEarbudMic: Bool) {
         self.isUsingEarbudMic = useEarbudMic
-        if SharedAudioEngine.shared.isRunning {
+        if GhostAudioEngine.shared.isRunning {
             do {
-                try SharedAudioEngine.shared.configureAudioSession(forceEarbudMic: useEarbudMic)
+                try GhostAudioEngine.shared.configureAudioSession(mode: .voiceChat, forceEarbudMic: useEarbudMic)
             } catch {
                 print("Failed to switch audio session microphone route: \(error)")
             }
@@ -214,10 +214,10 @@ public final class ProMicEngine: NSObject, ObservableObject, AVAudioPlayerDelega
     public func start10SecondRecording() {
         guard !isRecording else { return }
 
-        // Start SharedAudioEngine lazily with non-interrupting options if needed
-        if !SharedAudioEngine.shared.isRunning {
+        // Start GhostAudioEngine lazily with non-interrupting options if needed
+        if !GhostAudioEngine.shared.isRunning {
             do {
-                try SharedAudioEngine.shared.startEngine(forceEarbudMic: isUsingEarbudMic)
+                try GhostAudioEngine.shared.startEngine(mode: .voiceChat, forceEarbudMic: isUsingEarbudMic)
             } catch {
                 print("Failed to start audio engine for recording: \(error)")
             }
