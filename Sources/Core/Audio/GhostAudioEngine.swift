@@ -6,7 +6,8 @@
 //  Features:
 //  1. Persistent background execution with UIBackgroundModes: audio & bluetooth-central.
 //  2. Real Software Transparency (Live Mic Passthrough):
-//     iPhone inputNode -> micPassthroughMixer -> preEQMixer -> 10-band AVAudioUnitEQ -> AVAudioUnitVarispeed -> mainMixer -> outputNode (5ms ultra-low latency).
+//     Clean graph reset, explicit inputNode output disconnection & session pre-activation
+//     to prevent isInputConnToConverter CoreAudio crashes on rapid toggles.
 //  3. Audible 10-Band Parametric Equalizer with live filter parameters updating in real time.
 //  4. Built-in Synthesized Stereo Acoustic/Bass Test Loop for instant audio validation of every EQ slider.
 //  5. Real iOS route detection via AVAudioSession.currentRoute monitoring (zero hardcoded strings).
@@ -65,12 +66,24 @@ public final class GhostAudioEngine: ObservableObject {
 
     private var isTapInstalled: Bool = false
     private let engineQueue = DispatchQueue(label: "com.airgestalt.ghostengine.queue", qos: .userInitiated)
+    private static let queueSpecificKey = DispatchSpecificKey<Void>()
     private var cachedTestAudioBuffer: AVAudioPCMBuffer?
 
     private init() {
+        engineQueue.setSpecific(key: GhostAudioEngine.queueSpecificKey, value: ())
         self.isGhostModeActive = UserDefaults.standard.bool(forKey: "com.airgestalt.ghostModeActive")
         setupNotificationObservers()
         updateActiveRoute()
+    }
+
+    // MARK: - Thread-Safe Queue Serialization Helper
+
+    private func runOnEngineQueue(_ block: @escaping () -> Void) {
+        if DispatchQueue.getSpecific(key: GhostAudioEngine.queueSpecificKey) != nil {
+            block()
+        } else {
+            engineQueue.async(execute: block)
+        }
     }
 
     // MARK: - Safe Audio Session Configuration (Strictly Non-Interrupting)
@@ -192,19 +205,62 @@ public final class GhostAudioEngine: ObservableObject {
         }
     }
 
-    // MARK: - Engine Lifecycle & Graph Construction
+    // MARK: - Thread-Safe Engine Start & Clean Graph Setup
 
     public func startEngine(
         mode: AVAudioSession.Mode = .measurement,
         forceEarbudMic: Bool = false
     ) throws {
-        guard !isRunning else { return }
+        if DispatchQueue.getSpecific(key: GhostAudioEngine.queueSpecificKey) != nil {
+            try performStartEngine(mode: mode, forceEarbudMic: forceEarbudMic)
+        } else {
+            var startError: Error?
+            engineQueue.sync {
+                do {
+                    try self.performStartEngine(mode: mode, forceEarbudMic: forceEarbudMic)
+                } catch {
+                    startError = error
+                }
+            }
+            if let error = startError {
+                throw error
+            }
+        }
+    }
 
-        // 1. Configure audio session with ultra-low buffer duration
+    private func performStartEngine(
+        mode: AVAudioSession.Mode,
+        forceEarbudMic: Bool
+    ) throws {
+        // Step 1: Request/verify microphone permission & activate AVAudioSession FIRST
+        let session = AVAudioSession.sharedInstance()
+        if session.recordPermission == .undetermined {
+            session.requestRecordPermission { _ in }
+        }
+
         try configureAudioSession(mode: mode, forceEarbudMic: forceEarbudMic)
 
-        // 2. Lazily instantiate audio engine & DSP nodes
-        let newEngine = AVAudioEngine()
+        // Step 2: Clean graph reset before touching or wiring inputNode
+        // If an engine already exists, stop, remove tap, disconnect inputNode, and reset
+        if let currentEngine = self.engine {
+            self.removeInputTapSafely()
+            self.testPlayerNode?.stop()
+            self.chimePlayerNode?.stop()
+            if currentEngine.isRunning {
+                currentEngine.stop()
+            }
+            currentEngine.disconnectNodeOutput(currentEngine.inputNode)
+            currentEngine.reset()
+        }
+
+        let activeEngine = self.engine ?? AVAudioEngine()
+        if activeEngine.isRunning {
+            activeEngine.stop()
+        }
+        activeEngine.disconnectNodeOutput(activeEngine.inputNode)
+        activeEngine.reset()
+
+        // Step 3: Instantiate and attach nodes cleanly
         let newMicMixer = AVAudioMixerNode()
         let newTestPlayer = AVAudioPlayerNode()
         let newChimePlayer = AVAudioPlayerNode()
@@ -212,7 +268,7 @@ public final class GhostAudioEngine: ObservableObject {
         let newEQ = AVAudioUnitEQ(numberOfBands: 10)
         let newVarispeed = AVAudioUnitVarispeed()
 
-        self.engine = newEngine
+        self.engine = activeEngine
         self.micPassthroughMixer = newMicMixer
         self.testPlayerNode = newTestPlayer
         self.chimePlayerNode = newChimePlayer
@@ -220,22 +276,19 @@ public final class GhostAudioEngine: ObservableObject {
         self.eqNode = newEQ
         self.varispeedNode = newVarispeed
 
-        // Setup 10-Band EQ filters & Varispeed
         setup10BandEQ(on: newEQ)
         newVarispeed.rate = 1.0
 
-        // Attach nodes to engine graph
-        newEngine.attach(newMicMixer)
-        newEngine.attach(newTestPlayer)
-        newEngine.attach(newChimePlayer)
-        newEngine.attach(newPreEQMixer)
-        newEngine.attach(newEQ)
-        newEngine.attach(newVarispeed)
+        activeEngine.attach(newMicMixer)
+        activeEngine.attach(newTestPlayer)
+        activeEngine.attach(newChimePlayer)
+        activeEngine.attach(newPreEQMixer)
+        activeEngine.attach(newEQ)
+        activeEngine.attach(newVarispeed)
 
-        // Set initial mic passthrough volume
         newMicMixer.outputVolume = isSoftwareTransparencyActive ? transparencyGain : 0.0
 
-        let mainMixer = newEngine.mainMixerNode
+        let mainMixer = activeEngine.mainMixerNode
         let standard = GhostAudioEngine.canonicalFormat
 
         // Connect Pre-EQ inputs:
@@ -243,33 +296,39 @@ public final class GhostAudioEngine: ObservableObject {
         // testPlayerNode -> preEQMixer
         // preEQMixer -> eqNode -> varispeedNode -> mainMixer
         if let standard = standard {
-            newEngine.connect(newMicMixer, to: newPreEQMixer, format: standard)
-            newEngine.connect(newTestPlayer, to: newPreEQMixer, format: standard)
-            newEngine.connect(newPreEQMixer, to: newEQ, format: standard)
-            newEngine.connect(newEQ, to: newVarispeed, format: standard)
-            newEngine.connect(newVarispeed, to: mainMixer, format: standard)
-            newEngine.connect(newChimePlayer, to: mainMixer, format: standard)
+            activeEngine.connect(newMicMixer, to: newPreEQMixer, format: standard)
+            activeEngine.connect(newTestPlayer, to: newPreEQMixer, format: standard)
+            activeEngine.connect(newPreEQMixer, to: newEQ, format: standard)
+            activeEngine.connect(newEQ, to: newVarispeed, format: standard)
+            activeEngine.connect(newVarispeed, to: mainMixer, format: standard)
+            activeEngine.connect(newChimePlayer, to: mainMixer, format: standard)
         } else {
-            newEngine.connect(newMicMixer, to: newPreEQMixer, format: nil)
-            newEngine.connect(newTestPlayer, to: newPreEQMixer, format: nil)
-            newEngine.connect(newPreEQMixer, to: newEQ, format: nil)
-            newEngine.connect(newEQ, to: newVarispeed, format: nil)
-            newEngine.connect(newVarispeed, to: mainMixer, format: nil)
-            newEngine.connect(newChimePlayer, to: mainMixer, format: nil)
+            activeEngine.connect(newMicMixer, to: newPreEQMixer, format: nil)
+            activeEngine.connect(newTestPlayer, to: newPreEQMixer, format: nil)
+            activeEngine.connect(newPreEQMixer, to: newEQ, format: nil)
+            activeEngine.connect(newEQ, to: newVarispeed, format: nil)
+            activeEngine.connect(newVarispeed, to: mainMixer, format: nil)
+            activeEngine.connect(newChimePlayer, to: mainMixer, format: nil)
         }
 
-        // Connect inputNode to micPassthroughMixer safely
-        let inputNode = newEngine.inputNode
+        // Step 4: Safely query and wire inputNode ONLY after session is active
+        // Disconnect output first so inputNode is never double-connected to an internal converter
+        let inputNode = activeEngine.inputNode
+        activeEngine.disconnectNodeOutput(inputNode)
+
         let inputFormat = inputNode.outputFormat(forBus: 0)
-        if inputFormat.sampleRate > 0 && inputFormat.channelCount > 0 {
-            newEngine.connect(inputNode, to: newMicMixer, format: inputFormat)
+        guard inputFormat.sampleRate > 0 && inputFormat.channelCount > 0 else {
+            print("GhostAudioEngine: Invalid input format (\(inputFormat)), aborting inputNode connection.")
+            return
         }
 
-        // 3. Start engine and chime player
-        try newEngine.start()
+        activeEngine.connect(inputNode, to: newMicMixer, format: inputFormat)
+
+        // Step 5: Start the engine safely
+        try activeEngine.start()
         newChimePlayer.play()
 
-        installInputTapSafely()
+        installInputTapSafely(mode: mode)
 
         DispatchQueue.main.async {
             self.isRunning = true
@@ -277,34 +336,41 @@ public final class GhostAudioEngine: ObservableObject {
     }
 
     public func stopEngine() {
-        engineQueue.async { [weak self] in
+        runOnEngineQueue { [weak self] in
             guard let self = self else { return }
+            self.performStopEngine()
+        }
+    }
 
-            if let engine = self.engine {
-                self.removeInputTapSafely()
-                self.testPlayerNode?.stop()
-                self.chimePlayerNode?.stop()
+    private func performStopEngine() {
+        if let engine = self.engine {
+            self.removeInputTapSafely()
+            self.testPlayerNode?.stop()
+            self.chimePlayerNode?.stop()
+            if engine.isRunning {
                 engine.stop()
-                self.engine = nil
-                self.micPassthroughMixer = nil
-                self.testPlayerNode = nil
-                self.chimePlayerNode = nil
-                self.preEQMixer = nil
-                self.eqNode = nil
-                self.varispeedNode = nil
             }
+            engine.disconnectNodeOutput(engine.inputNode)
+            engine.reset()
+            self.engine = nil
+            self.micPassthroughMixer = nil
+            self.testPlayerNode = nil
+            self.chimePlayerNode = nil
+            self.preEQMixer = nil
+            self.eqNode = nil
+            self.varispeedNode = nil
+        }
 
-            // Clean Deactivation: Restore full priority to background music apps
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        // Clean Deactivation: Restore full priority to background music apps
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
 
-            DispatchQueue.main.async {
-                self.isRunning = false
-                self.isSoftwareTransparencyActive = false
-                self.isAmbientMonitoringActive = false
-                self.isPlayingTestAudio = false
-                VDSPAntiNoiseProcessor.shared.ambientSPLdB = 0.0
-                VDSPAntiNoiseProcessor.shared.frequencySpectrum = Array(repeating: 0.0, count: 24)
-            }
+        DispatchQueue.main.async {
+            self.isRunning = false
+            self.isSoftwareTransparencyActive = false
+            self.isAmbientMonitoringActive = false
+            self.isPlayingTestAudio = false
+            VDSPAntiNoiseProcessor.shared.ambientSPLdB = 0.0
+            VDSPAntiNoiseProcessor.shared.frequencySpectrum = Array(repeating: 0.0, count: 24)
         }
     }
 
@@ -316,19 +382,19 @@ public final class GhostAudioEngine: ObservableObject {
             self.isGhostModeActive = active
         }
 
-        engineQueue.async { [weak self] in
+        runOnEngineQueue { [weak self] in
             guard let self = self else { return }
             if active {
                 if !self.isRunning || self.engine == nil {
                     do {
-                        try self.startEngine(mode: .measurement, forceEarbudMic: self.isUsingEarbudMic)
+                        try self.performStartEngine(mode: .measurement, forceEarbudMic: self.isUsingEarbudMic)
                     } catch {
                         print("GhostAudioEngine: Failed to start for Ghost Mode: \(error)")
                     }
                 }
             } else {
                 if !self.isSoftwareTransparencyActive && !self.isAmbientMonitoringActive && !self.isPlayingTestAudio {
-                    self.stopEngine()
+                    self.performStopEngine()
                 }
             }
         }
@@ -338,16 +404,15 @@ public final class GhostAudioEngine: ObservableObject {
 
     public func setTransparencyActive(_ active: Bool, gain: Float = 1.0) {
         let safeGain = max(0.0, min(2.0, gain))
-        self.isSoftwareTransparencyActive = active
         self.transparencyGain = safeGain
 
-        engineQueue.async { [weak self] in
+        runOnEngineQueue { [weak self] in
             guard let self = self else { return }
 
             if active {
                 if !self.isRunning || self.engine == nil {
                     do {
-                        try self.startEngine(mode: .measurement, forceEarbudMic: self.isUsingEarbudMic)
+                        try self.performStartEngine(mode: .measurement, forceEarbudMic: self.isUsingEarbudMic)
                     } catch {
                         print("GhostAudioEngine: Failed to start for transparency: \(error)")
                     }
@@ -356,7 +421,7 @@ public final class GhostAudioEngine: ObservableObject {
             } else {
                 self.micPassthroughMixer?.outputVolume = 0.0
                 if !self.isAmbientMonitoringActive && !self.isPlayingTestAudio && !self.isGhostModeActive {
-                    self.stopEngine()
+                    self.performStopEngine()
                 }
             }
 
@@ -466,12 +531,12 @@ public final class GhostAudioEngine: ObservableObject {
     public func startTestAudioLoop() {
         guard !isPlayingTestAudio else { return }
 
-        engineQueue.async { [weak self] in
+        runOnEngineQueue { [weak self] in
             guard let self = self else { return }
 
             if !self.isRunning || self.engine == nil {
                 do {
-                    try self.startEngine(mode: .measurement, forceEarbudMic: self.isUsingEarbudMic)
+                    try self.performStartEngine(mode: .measurement, forceEarbudMic: self.isUsingEarbudMic)
                 } catch {
                     print("GhostAudioEngine: Failed to start for test loop: \(error)")
                     return
@@ -494,7 +559,7 @@ public final class GhostAudioEngine: ObservableObject {
     public func stopTestAudioLoop() {
         guard isPlayingTestAudio else { return }
 
-        engineQueue.async { [weak self] in
+        runOnEngineQueue { [weak self] in
             guard let self = self else { return }
             self.testPlayerNode?.stop()
 
@@ -503,7 +568,7 @@ public final class GhostAudioEngine: ObservableObject {
             }
 
             if !self.isSoftwareTransparencyActive && !self.isAmbientMonitoringActive && !self.isGhostModeActive {
-                self.stopEngine()
+                self.performStopEngine()
             }
         }
     }
@@ -532,7 +597,7 @@ public final class GhostAudioEngine: ObservableObject {
     }
 
     public func updateLiveEQGain(bandIndex: Int, gain: Float) {
-        engineQueue.async { [weak self] in
+        runOnEngineQueue { [weak self] in
             guard let self = self,
                   let eq = self.eqNode,
                   bandIndex >= 0 && bandIndex < eq.bands.count else { return }
@@ -541,7 +606,7 @@ public final class GhostAudioEngine: ObservableObject {
     }
 
     public func updateAllLiveEQBands(gains: [Float]) {
-        engineQueue.async { [weak self] in
+        runOnEngineQueue { [weak self] in
             guard let self = self, let eq = self.eqNode else { return }
             for (index, gain) in gains.enumerated() {
                 guard index < eq.bands.count else { break }
@@ -554,19 +619,19 @@ public final class GhostAudioEngine: ObservableObject {
 
     public func setAmbientMonitoringActive(_ active: Bool) {
         self.isAmbientMonitoringActive = active
-        engineQueue.async { [weak self] in
+        runOnEngineQueue { [weak self] in
             guard let self = self else { return }
             if active {
                 if !self.isRunning || self.engine == nil {
                     do {
-                        try self.startEngine(mode: .measurement, forceEarbudMic: self.isUsingEarbudMic)
+                        try self.performStartEngine(mode: .measurement, forceEarbudMic: self.isUsingEarbudMic)
                     } catch {
                         print("Failed to start engine for ambient monitoring: \(error)")
                     }
                 }
             } else {
                 if !self.isSoftwareTransparencyActive && !self.isPlayingTestAudio && !self.isGhostModeActive {
-                    self.stopEngine()
+                    self.performStopEngine()
                 }
             }
         }
@@ -575,12 +640,12 @@ public final class GhostAudioEngine: ObservableObject {
     // MARK: - Safe Buffer Scheduling (Chimes, Chirps, Fit Test)
 
     public func scheduleBufferSafely(_ buffer: AVAudioPCMBuffer) {
-        engineQueue.async { [weak self] in
+        runOnEngineQueue { [weak self] in
             guard let self = self else { return }
 
             if !self.isRunning || self.engine == nil {
                 do {
-                    try self.startEngine(mode: .measurement, forceEarbudMic: self.isUsingEarbudMic)
+                    try self.performStartEngine(mode: .measurement, forceEarbudMic: self.isUsingEarbudMic)
                 } catch {
                     print("GhostAudioEngine start error: \(error)")
                     return
@@ -662,7 +727,7 @@ public final class GhostAudioEngine: ObservableObject {
 
     // MARK: - Dynamic Input Tap Management
 
-    public func installInputTapSafely() {
+    public func installInputTapSafely(mode: AVAudioSession.Mode = .measurement) {
         guard let engine = self.engine, !isTapInstalled else { return }
 
         let inputNode = engine.inputNode
@@ -697,7 +762,9 @@ public final class GhostAudioEngine: ObservableObject {
         }
 
         isTapInstalled = true
-        ProMicEngine.shared.configureVoiceProcessing(on: inputNode)
+        if mode == .voiceChat {
+            ProMicEngine.shared.configureVoiceProcessing(on: inputNode)
+        }
     }
 
     public func removeInputTapSafely() {
@@ -727,7 +794,7 @@ public final class GhostAudioEngine: ObservableObject {
     @objc private func handleAudioRouteChange(_ notification: Notification) {
         updateActiveRoute()
         guard engine?.isRunning == true else { return }
-        engineQueue.async { [weak self] in
+        runOnEngineQueue { [weak self] in
             guard let self = self, self.engine?.isRunning == true else { return }
             self.removeInputTapSafely()
 
@@ -749,9 +816,9 @@ public final class GhostAudioEngine: ObservableObject {
               let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
 
         if type == .ended {
-            engineQueue.async { [weak self] in
+            runOnEngineQueue { [weak self] in
                 guard let self = self, self.isRunning else { return }
-                try? self.startEngine(mode: .measurement, forceEarbudMic: self.isUsingEarbudMic)
+                try? self.performStartEngine(mode: .measurement, forceEarbudMic: self.isUsingEarbudMic)
             }
         }
     }
